@@ -659,6 +659,8 @@ describe("mcp-auth-flow explicit auth", () => {
 
   it("re-registers dynamic OAuth clients when cached redirect URIs are stale", async () => {
     mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toEqual({ client_id: "stale-client", client_secret: "stale-secret", redirect_uris: ["http://localhost:19876/callback"] });
+      await provider.invalidateCredentials("tokens");
       expect(await provider.clientInformation()).toBeUndefined();
       await provider.saveClientInformation({
         client_id: "fresh-client",
@@ -689,9 +691,9 @@ describe("mcp-auth-flow explicit auth", () => {
     const stored = getAuthForUrl("stale-redirect", "https://api.example.com/mcp");
     expect(stored?.clientInfo?.clientId).toBe("fresh-client");
     expect(stored?.clientInfo?.redirectUris).toEqual(["http://localhost:3118/callback"]);
-    expect(stored?.tokens).toBeUndefined();
-    expect(stored?.codeVerifier).toBeUndefined();
-    expect(stored?.oauthState).not.toBe("old-state");
+    expect(stored?.tokens?.refreshToken).toBe("old-refresh");
+    expect(stored?.codeVerifier).toBe("old-verifier");
+    expect(stored?.oauthState).toBe("old-state");
     expect(mocks.ensureCallbackServer).toHaveBeenCalledWith(expect.objectContaining({
       strictPort: true,
       port: 3118,
@@ -704,6 +706,8 @@ describe("mcp-auth-flow explicit auth", () => {
 
   it("re-registers dynamic OAuth clients when cached redirect URI metadata is missing", async () => {
     mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toEqual({ client_id: "legacy-client", client_secret: "legacy-secret" });
+      await provider.invalidateCredentials("tokens");
       expect(await provider.clientInformation()).toBeUndefined();
       await provider.saveClientInformation({
         client_id: "fresh-client",
@@ -730,11 +734,13 @@ describe("mcp-auth-flow explicit auth", () => {
     const stored = getAuthForUrl("missing-redirect-metadata", "https://api.example.com/mcp");
     expect(stored?.clientInfo?.clientId).toBe("fresh-client");
     expect(stored?.clientInfo?.redirectUris).toEqual(["http://localhost:19876/callback"]);
-    expect(stored?.tokens).toBeUndefined();
+    expect(stored?.tokens?.refreshToken).toBe("old-refresh");
   });
 
   it("re-registers dynamic OAuth clients when cached redirect URI metadata is malformed", async () => {
     mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      expect(await provider.clientInformation()).toEqual({ client_id: "legacy-client", client_secret: "legacy-secret" });
+      await provider.invalidateCredentials("tokens");
       expect(await provider.clientInformation()).toBeUndefined();
       await provider.saveClientInformation({
         client_id: "fresh-client",
@@ -764,7 +770,7 @@ describe("mcp-auth-flow explicit auth", () => {
     const stored = getAuthForUrl("malformed-redirect-metadata", "https://api.example.com/mcp");
     expect(stored?.clientInfo?.clientId).toBe("fresh-client");
     expect(stored?.clientInfo?.redirectUris).toEqual(["http://localhost:19876/callback"]);
-    expect(stored?.tokens).toBeUndefined();
+    expect(stored?.tokens?.refreshToken).toBe("old-refresh");
   });
 
   it("refreshes expired tokens even when cached dynamic redirect URIs are stale", async () => {
@@ -842,6 +848,7 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(mocks.sdkAuth).toHaveBeenNthCalledWith(2, expect.anything(), {
       serverUrl: "https://api.example.com/mcp",
       authorizationCode: "manual-code",
+      fetchFn: expect.any(Function),
     });
     expect(mocks.cancelPendingCallback).toHaveBeenCalledWith(mocks.waitForCallback.mock.calls[0][0]);
     expect(getOAuthState("browser-fail")).toBeUndefined();
@@ -859,6 +866,7 @@ describe("mcp-auth-flow explicit auth", () => {
         expect(options).toEqual({
           serverUrl: "https://api.example.com/mcp",
           authorizationCode: "pasted-code",
+          fetchFn: expect.any(Function),
         });
         return "AUTHORIZED";
       });
@@ -1140,12 +1148,14 @@ describe("mcp-auth-flow explicit auth", () => {
       serverUrl: "https://api.example.com/mcp",
       resourceMetadataUrl: new URL(resourceMetadataUrl),
       scope: "mcp:read",
+      fetchFn: expect.any(Function),
     });
     expect(mocks.sdkAuth).toHaveBeenNthCalledWith(2, expect.anything(), {
       serverUrl: "https://api.example.com/mcp",
       authorizationCode: "auth-code",
       resourceMetadataUrl: new URL(resourceMetadataUrl),
       scope: "mcp:read",
+      fetchFn: expect.any(Function),
     });
     expect(mocks.cancelPendingCallback).toHaveBeenCalledWith(oauthState);
     expect(getOAuthState("direct-complete")).toBeUndefined();
@@ -1171,11 +1181,13 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(mocks.sdkAuth).toHaveBeenNthCalledWith(1, expect.anything(), {
       serverUrl: "https://api.example.com/mcp",
       scope: "session:role:MCP_ROLE",
+      fetchFn: expect.any(Function),
     });
     expect(mocks.sdkAuth).toHaveBeenNthCalledWith(2, expect.anything(), {
       serverUrl: "https://api.example.com/mcp",
       authorizationCode: "auth-code",
       scope: "session:role:MCP_ROLE",
+      fetchFn: expect.any(Function),
     });
   });
 

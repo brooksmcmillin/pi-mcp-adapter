@@ -48,7 +48,7 @@
     "test:public-exports": "npm run build:public && node --test public-exports.test.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:oauth": "PI_MCP_ADAPTER_TEST_AUTH_STORE=memory PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1 node --import tsx --test --test-concurrency=1 oauth-public-api.test.ts mcp-auth.test.ts mcp-auth-flow.test.ts mcp-callback-server.test.ts mcp-oauth-provider.test.ts mcp-local-oauth-flow.test.ts",
+    "test:oauth": "PI_MCP_ADAPTER_TEST_AUTH_STORE=memory PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1 node --import tsx --test --test-concurrency=1 oauth-public-api.test.ts mcp-auth.test.ts mcp-auth-flow.test.ts mcp-auth-flow-timeout.test.ts mcp-callback-server.test.ts mcp-oauth-provider.test.ts mcp-local-oauth-flow.test.ts",
     "test:oauth-provider": "PI_MCP_ADAPTER_TEST_AUTH_STORE=memory PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1 node --import tsx --test mcp-oauth-provider.test.ts",
     "test:conformance": "bash conformance/run.sh"
   },
@@ -89,6 +89,7 @@
     "ts-shape.ts",
     "search-ranking.ts",
     "tool-approval.ts",
+    "session-approvals.ts",
     "init.ts",
     "failure-backoff.ts",
     "ui-session.ts",
@@ -105,6 +106,7 @@
     "ui-tool-visibility.ts",
     "ui-app-bridge-helpers.ts",
     "config.ts",
+    "claude-plugin-loader.ts",
     "package-mcp-loader.ts",
     "server-manager.ts",
     "request-headers-command.ts",
@@ -140,6 +142,7 @@
     "mcp-callback-server.ts",
     "mcp-auth-flow.ts",
     "mcp-panel.ts",
+    "mcp-panel-theme.ts",
     "panel-keys.ts",
     "mcp-trace.ts",
     "logger.ts",
@@ -167,7 +170,7 @@
     "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.1 || ^0.85.0",
     "@earendil-works/pi-tui": "*",
     "typebox": "*",
     "zod": "^3.25.0 || ^4.0.0"

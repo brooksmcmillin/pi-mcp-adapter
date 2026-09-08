@@ -1,17 +1,19 @@
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { formatWithOptions } from "node:util";
 import { Worker } from "node:worker_threads";
+import { throwIfAborted } from "./abort.ts";
 import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
 import { executeCall } from "./proxy-modes.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";
 import { paginate, rankSuggestions, rankToolMatches } from "./search-ranking.ts";
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import type { McpExtensionState } from "./state.ts";
-import { findToolByName, formatSchema } from "./tool-metadata.ts";
+import { findToolByName, formatSchema, hasSchemaDescriptions } from "./tool-metadata.ts";
 import { renderTsShape } from "./ts-shape.ts";
 import type { ContentBlock } from "./types.ts";
 
 export const DEFAULT_MCP_SCRIPT_TIMEOUT_MS = 30_000;
+const MCP_SCRIPT_INTERMEDIATE_MAX_BYTES = 16 * 1024 * 1024;
 
 class McpScriptTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -30,7 +32,8 @@ type WorkerMessage =
   | { type: "done"; returnBlock?: unknown }
   | { type: "error"; message: string };
 
-type WorkerResultMessage = { type: "result"; id: number; envelope: unknown };
+type WorkerResultPayload = { envelope: unknown } | { dataJson: string };
+type WorkerResultMessage = { type: "result"; id: number } & WorkerResultPayload;
 
 function needsInspectableFormatting(value: unknown, stack = new WeakSet<object>()): boolean {
   if (value === undefined || typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") return true;
@@ -136,11 +139,18 @@ export async function runMcpScript(
       : operation.durationMs,
   }));
   let callsSnapshot: ScriptOperation[] | undefined;
-  const callTool = async (path: string, args?: Record<string, unknown>) => {
+  let intermediateBytes = 0;
+  const callTool = async (path: string, args?: Record<string, unknown>): Promise<WorkerResultPayload> => {
     // Record before dispatch so calls still in flight at timeout/abort appear in the trace.
     const startedAt = Date.now();
     const index = calls.push({ operation: "call", path, ok: false, error: "incomplete", durationMs: 0, startedAt }) - 1;
-    const result = await executeCall(state, path, args, undefined, getPiTools, callSignal, "script");
+    let dataJson: string | undefined;
+    const result = await executeCall(state, path, args, undefined, getPiTools, callSignal, "script", {
+      onSuccess(data) {
+        // Serialize once for both byte accounting and worker transfer, never for display.
+        dataJson = JSON.stringify(data);
+      },
+    });
     const details = result.details;
     if (details.error !== undefined) {
       const errorCode = String(details.error);
@@ -154,15 +164,26 @@ export async function runMcpScript(
           : textFromContent(result.content);
       calls[index] = { operation: "call", path, ok: false, error: errorCode, durationMs: Date.now() - startedAt, startedAt };
       return {
-        ok: false as const,
-        error: { code: errorCode, message },
+        envelope: { ok: false, error: { code: errorCode, message } },
       };
     }
+    throwIfAborted(callSignal);
+    if (dataJson === undefined) throw new Error("MCP intermediate result was not JSON serializable");
+    const bytes = Buffer.byteLength(dataJson, "utf8");
+    if (bytes > MCP_SCRIPT_INTERMEDIATE_MAX_BYTES - intermediateBytes) {
+      const code = "intermediate_result_too_large";
+      calls[index] = { operation: "call", path, ok: false, error: code, durationMs: Date.now() - startedAt, startedAt };
+      return {
+        envelope: {
+          ok: false,
+          error: { code, message: "MCP result exceeds the remaining mcpScript intermediate transfer budget (16 MiB per script). Request less data or use a new script." },
+        },
+      };
+    }
+    // Rejected responses do not consume budget. This bounds transfer, not upstream allocation.
+    intermediateBytes += bytes;
     calls[index] = { operation: "call", path, ok: true, durationMs: Date.now() - startedAt, startedAt };
-    return {
-      ok: true as const,
-      data: details.mcpResult !== undefined ? details.mcpResult : textFromContent(result.content),
-    };
+    return { dataJson };
   };
 
   const searchTools = (input?: SearchInput) => {
@@ -206,15 +227,20 @@ export async function runMcpScript(
         if (isServerInActiveFailureBackoff(state, server)) continue;
         const tool = findToolByName(metadata, path);
         if (!tool) continue;
-        const inputTypeScript = tool.inputSchema
-          ? renderTsShape(tool.inputSchema) ?? formatSchema(tool.inputSchema)
-          : null;
+        const inputShape = tool.inputSchema ? renderTsShape(tool.inputSchema) : null;
+        const inputTypeScript = inputShape ?? (tool.inputSchema ? formatSchema(tool.inputSchema) : null);
         return {
           path: tool.name,
           name: tool.originalName,
           server,
           ...(tool.description ? { description: tool.description } : {}),
           ...(inputTypeScript ? { inputTypeScript } : {}),
+          ...(inputShape && hasSchemaDescriptions(tool.inputSchema)
+            ? { inputGuidance: formatSchema(tool.inputSchema) } : {}),
+          ...(tool.outputSchema !== undefined ? {
+            outputSchemaTarget: "data.structuredContent",
+            outputSchema: tool.outputSchema,
+          } : {}),
         };
       }
       const suggestions = path ? rankSuggestions(state, path, 5) : [];
@@ -279,15 +305,16 @@ export async function runMcpScript(
         }
 
         void (async () => {
-          let envelope: unknown;
+          let payload: WorkerResultPayload;
           if (message.type === "call") {
-            envelope = await callTool(message.path, message.args as Record<string, unknown> | undefined);
+            payload = await callTool(message.path, message.args as Record<string, unknown> | undefined);
           } else if (message.type === "search") {
-            envelope = searchTools(message.input as SearchInput | undefined);
+            payload = { envelope: searchTools(message.input as SearchInput | undefined) };
           } else {
-            envelope = describeTool(message.input as DescribeInput | undefined);
+            payload = { envelope: describeTool(message.input as DescribeInput | undefined) };
           }
-          const response: WorkerResultMessage = { type: "result", id: message.id, envelope };
+          if (completed || callSignal?.aborted) return;
+          const response: WorkerResultMessage = { type: "result", id: message.id, ...payload };
           activeWorker.postMessage(response);
         })().catch(reject);
       });

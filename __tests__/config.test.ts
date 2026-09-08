@@ -242,7 +242,7 @@ describe("config discovery", () => {
     warning.mockRestore();
   });
 
-  it("keeps unspecified Agent Plugin fields when normal config overrides a plugin server", async () => {
+  it("keeps Agent Plugin fields and adapter-specific Pi overrides when normal config overrides a plugin server", async () => {
     const home = mkdtempSync(join(tmpdir(), "pi-mcp-plugin-override-home-"));
     const project = mkdtempSync(join(tmpdir(), "pi-mcp-plugin-override-project-"));
     process.env.HOME = home;
@@ -259,12 +259,13 @@ describe("config discovery", () => {
     });
     writeJson(join(project, ".mcp.json"), {
       settings: { agentPluginPaths: ["./plugins/acme-tools"] },
-      mcpServers: { acme_tools__local: { command: "override-node" } },
+      mcpServers: { acme_tools__local: { command: "override-node", inheritEnv: false } },
     });
 
     const { loadMcpConfig } = await import("../config.ts");
     expect(loadMcpConfig().mcpServers.acme_tools__local).toMatchObject({
       command: "override-node",
+      inheritEnv: false,
       args: ["plugin.js"],
       cwd: realpathSync(plugin),
       env: { PLUGIN_ROOT: realpathSync(plugin) },
@@ -545,24 +546,29 @@ describe("config discovery", () => {
 
     writeJson(join(home, ".config", "mcp", "mcp.json"), {
       mcpServers: {
-        toSocket: { command: "old", args: ["--old"], env: { OLD: "1" }, cwd: "/old" },
+        toSocket: { command: "old", args: ["--old"], env: { OLD: "1" }, cwd: "/old", inheritEnv: false },
         toCommand: { socket: "/old.sock" },
-        toUrl: { socket: "/old.sock" },
+        toUrl: { command: "old", inheritEnv: false },
       },
     });
     writeJson(join(home, ".pi", "agent", "mcp.json"), {
       mcpServers: {
         toSocket: { socket: "/shared.sock" },
-        toCommand: { command: "new" },
+        toCommand: { command: "new", inheritEnv: false },
         toUrl: { url: "https://example.test/mcp" },
+      },
+    });
+    writeJson(join(project, ".pi", "mcp.json"), {
+      mcpServers: {
+        toUrl: { command: "new-after-http" },
       },
     });
 
     const { loadMcpConfig } = await import("../config.ts");
     const servers = loadMcpConfig().mcpServers;
     expect(servers.toSocket).toEqual({ socket: "/shared.sock" });
-    expect(servers.toCommand).toEqual({ command: "new" });
-    expect(servers.toUrl).toEqual({ url: "https://example.test/mcp" });
+    expect(servers.toCommand).toEqual({ command: "new", inheritEnv: false });
+    expect(servers.toUrl).toEqual({ command: "new-after-http" });
   });
 
   it("loads tool-agnostic .agents global MCP files before Pi overrides", async () => {

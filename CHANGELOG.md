@@ -9,9 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Script `tools.describe()` now exposes server-advertised output schemas for `data.structuredContent`, preserved through metadata caching and refresh. (#522)
+- Stdio MCP servers can opt out of arbitrary adapter environment inheritance with `inheritEnv: false`; SDK platform defaults and explicit `env` overlays remain. Thanks to [@zenolam](https://github.com/zenolam) for #509.
+- Local Claude plugin bundles can now be loaded from trusted configured directories, including bundled MCP servers and skills. Thanks to [@gugu91](https://github.com/gugu91) for PR #493.
 - OAuth credentials can opt into adapter-session-only storage with `settings.oauthPersistence: "session"`, isolating concurrent Pi sessions without changing configured server names or persisting tokens.
 - OAuth loopback redirects can use `{port}` with `localhost`, `127.0.0.1`, or `::1` when a provider permits RFC 8252 dynamic ports. Thanks to [@nrutman](https://github.com/nrutman) for PR #483.
 - Runtime MCP status snapshots now include each server's `directToolCount`, the number of direct tools currently registered with Pi, including resource tools. Thanks to [@FischLu](https://github.com/FischLu) for #482.
+
+### Changed
+
+- MCP setup and server panels now use Pi's active theme and TUI components while preserving their existing workflows. (#488)
+- MCP sampling requests now route through Pi's `ModelRegistry.complete`, leaving provider authentication, environment, and base URL handling to the host.
+- `mcp({ connect })` now reports the direct tools it discovers on the tool result via `addedToolNames`, Pi's result-scoped tool activation surface, so they load from that transcript point instead of through an active-tool list rewrite. (#490) Thanks to [@chiptoe-svg](https://github.com/chiptoe-svg) for PR #494.
+
+### Fixed
+
+- Script calls now preserve full intermediate data for filtering within a fixed 16 MiB cumulative transfer budget, returning `intermediate_result_too_large` when exhausted while retaining final-output guards. (#520)
+- Namespace proxy argument guidance now uses exact search-result tool names for schema inspection. Thanks to [@r1ckyIn](https://github.com/r1ckyIn) for PR #519.
+- Script `tools.describe()` now retains documented input field guidance alongside compact parameter shapes, including formats and units. (#521)
+- Early MCP tool discovery now honors `--mcp-config=<path>`, including paths containing `=`. (#512)
+- The repository lock now resolves `qs` to patched 6.16.0 for its published moderate advisories. (#517)
+- The optional `@earendil-works/pi-ai` peer now supports Pi 0.85 alongside 0.84.1, avoiding npm resolution conflicts. Thanks to [@dyld-w](https://github.com/dyld-w) for #507.
+- Session-scoped MCP tool approvals and MCP App iframe consent now persist on and restore from the active Pi session branch. (#492)
+- The `/mcp` panel no longer marks reconnects as cached when cache reload returns no entry, while preserving explicit zero-TTL behavior. Thanks to [@fyq163](https://github.com/fyq163) for #497.
+- MCP output truncation now uses Pi host truncation semantics and formatting while preserving MCP artifact spill behavior.
+- The repository lockfile now pins Ajv's transitive `fast-uri` dependency to patched 3.1.7, avoiding the stale 3.1.5 advisory finding. Thanks to [@escuelallenquen](https://github.com/escuelallenquen) for #513.
+- Exclusive mode now honors an explicit `--mcp-config` override instead of always loading the agent-global configuration. Thanks to [@willem445](https://github.com/willem445) for #496.
+- OAuth discovery, dynamic registration, token exchange, and token refresh requests now have a timeout and honor cancellation instead of hanging the agent on stalled providers. Thanks to [@west-david](https://github.com/west-david) for #485 and PR #486.
+- OAuth redirect URI mismatches now preserve refreshable credentials and re-register stale dynamic clients after `invalid_grant`. Thanks to [@CharlesMcMillan](https://github.com/CharlesMcMillan) for PR #495.
 
 ## [2.32.1] - 2026-09-01
 

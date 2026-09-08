@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { McpExtensionState } from "./state.ts";
 import { formatToolName, isServerDisabled, resolveToolPrefix, type McpAdapterOptions, type PromptMetadata, type ToolMetadata, type ToolSelectorCandidateIndex } from "./types.ts";
 import { existsSync } from "node:fs";
-import { cloneMcpConfig, loadMcpConfig } from "./config.ts";
+import { cloneMcpConfig, loadMcpConfig, resolveConfiguredClaudePluginMcp } from "./config.ts";
 import { ConsentManager } from "./consent-manager.ts";
 import { McpLifecycleManager } from "./lifecycle.ts";
 import {
@@ -38,6 +38,10 @@ import {
 } from "./runtime-owner.ts";
 import { publishMcpStatusSnapshot } from "./mcp-status.ts";
 import { FAILURE_BACKOFF_MS, getFailureAgeSeconds } from "./failure-backoff.ts";
+import {
+  createSessionApprovalWriter,
+  restoreSessionApprovalState,
+} from "./session-approvals.ts";
 export { getFailureAgeSeconds, getFailureMessage, isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 
 const MAX_FAILURE_MESSAGE_CHARS = 8 * 1024;
@@ -117,11 +121,26 @@ export async function initializeMcp(
   const rawUi = hasUI ? ctx.ui : undefined;
   const modelRegistry = ctx.modelRegistry;
   const initialSignal = ctx.signal;
+  let sessionManager: ExtensionContext["sessionManager"] | undefined;
+  try {
+    sessionManager = ctx.sessionManager;
+  } catch {
+    // Synthetic/load-time contexts may not expose a session manager.
+  }
+  let sessionBranch: readonly unknown[] = [];
+  if (sessionManager) {
+    try {
+      sessionBranch = sessionManager.getBranch();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.debug(`MCP: could not read the active session branch for approval restore: ${detail}`);
+    }
+  }
   const ui = rawUi ? createOwnedUi(rawUi, owner) : undefined;
   const runtimeSignal = combineAbortSignals(owner.signal, initialSignal);
   const config = options.config === undefined
     ? loadMcpConfig(configPath, cwd)
-    : cloneMcpConfig(options.config);
+    : resolveConfiguredClaudePluginMcp(cloneMcpConfig(options.config), cwd);
   const authStorageOptions = getAuthStorageOptions(
     config.settings?.oauthDir,
     cwd,
@@ -166,7 +185,17 @@ export async function initializeMcp(
   const failureMessages = new Map<string, string>();
   const approvedToolCalls = new Map<string, true>();
   const uiResourceHandler = new UiResourceHandler(manager, config);
-  const consentManager = new ConsentManager("once-per-server");
+  let appendEntry: ((customType: string, data?: unknown) => void) | undefined;
+  try {
+    const candidate = pi.appendEntry;
+    appendEntry = typeof candidate === "function" ? candidate.bind(pi) : undefined;
+  } catch {
+    // Load-time or synthetic APIs may not expose appendEntry yet.
+  }
+  const persistSessionApproval = sessionManager && appendEntry
+    ? createSessionApprovalWriter(appendEntry, () => owner.isActive())
+    : undefined;
+  const consentManager = new ConsentManager("once-per-server", persistSessionApproval);
   const state: McpExtensionState = {
     owner,
     manager,
@@ -184,6 +213,8 @@ export async function initializeMcp(
     failureTracker,
     failureMessages,
     approvedToolCalls,
+    ...(persistSessionApproval === undefined ? {} : { persistSessionApproval }),
+    ...(sessionManager === undefined ? {} : { sessionManager }),
     approvalEvents: pi.events,
     uiResourceHandler,
     consentManager,
@@ -198,6 +229,7 @@ export async function initializeMcp(
     sendMessage: (message, options) => {
       const deliver = () => {
         if (!owner.isActive()) return;
+        // SAFETY: McpExtensionState's message union mirrors Pi's sendMessage input while remaining decoupled from the host package type.
         pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options);
       };
       if (!options?.triggerTurn) {
@@ -213,6 +245,7 @@ export async function initializeMcp(
     },
     ...(options.statusEvents === undefined ? {} : { statusEvents: options.statusEvents }),
   };
+  if (sessionManager) restoreSessionApprovalState(state, sessionBranch);
   if (ownsOAuthRuntime) owner.addCleanup(() => shutdownOAuth(oauthRuntime));
   manager.setMetadataListChangedListener?.((serverName, reason) => {
     if (!owner.isActive()) return;

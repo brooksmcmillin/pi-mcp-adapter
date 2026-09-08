@@ -45,6 +45,7 @@ export interface McpTool {
     title?: SdkTool["title"];
     description?: SdkTool["description"];
     inputSchema?: SdkTool["inputSchema"];
+    outputSchema?: SdkTool["outputSchema"];
     _meta?: SdkTool["_meta"];
 }
 export interface McpResource {
@@ -267,6 +268,8 @@ export interface ServerEntry {
     /** Explicit rmcp-mux Unix-domain socket path. Mutually exclusive with command and url. */
     socket?: string;
     env?: Record<string, string>;
+    /** Inherit the adapter process environment for stdio servers. Defaults to true; false keeps SDK platform defaults plus explicit env overlays. */
+    inheritEnv?: boolean;
     cwd?: string;
     url?: string;
     headers?: Record<string, string>;
@@ -336,6 +339,7 @@ export interface McpOutputGuardSettings {
     detailsMaxBytes?: number;
 }
 export type ToolPrefix = "server" | "none" | "short" | "mcp";
+export declare function formatServerNamespace(serverName: string): string;
 export type HostConfigDiscovery = "off" | "prompt" | "on";
 export type McpFooterStatus = "full" | "compact" | "off";
 export interface McpTraceSettings {
@@ -436,10 +440,19 @@ export interface McpSettings {
      */
     oauthDir?: string;
 }
+export interface ClaudePluginConfig {
+    /** Explicit local Claude plugin directory. File-based config resolves relative paths from the active project cwd; createMcpAdapter snapshots programmatic paths against process.cwd(). */
+    path: string;
+    /** Load the plugin's root .mcp.json as low-precedence MCP defaults. */
+    mcp?: boolean;
+    /** Expose the plugin's root skills/ directory to Pi resource discovery. */
+    skills?: boolean;
+}
 export interface McpConfig {
     mcpServers: Record<string, ServerEntry>;
     imports?: ImportKind[];
     settings?: McpSettings;
+    claudePlugins?: ClaudePluginConfig[];
 }
 export interface McpAdapterOptions {
     config?: McpConfig;
@@ -454,6 +467,7 @@ export interface ToolMetadata {
     uiResourceUri?: string;
     uiVisibility?: UiToolVisibility[];
     inputSchema?: unknown;
+    outputSchema?: unknown;
     uiStreamMode?: UiStreamMode;
 }
 export interface PromptMetadata {
@@ -487,6 +501,7 @@ export interface CachedTool {
     name: string;
     description?: string;
     inputSchema?: unknown;
+    outputSchema?: unknown;
     uiResourceUri?: string;
     uiVisibility?: UiToolVisibility[];
     uiStreamMode?: "eager" | "stream-first";

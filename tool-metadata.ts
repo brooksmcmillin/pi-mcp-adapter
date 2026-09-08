@@ -108,6 +108,7 @@ export function buildToolMetadata(
       originalName: tool.name,
       description: tool.description ?? "",
       ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+      ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
       ...(uiResourceUri === undefined ? {} : { uiResourceUri }),
       ...(uiVisibility === undefined ? {} : { uiVisibility }),
       ...(uiStreamMode === undefined ? {} : { uiStreamMode }),
@@ -157,6 +158,19 @@ export function findToolByName(metadata: ToolMetadata[] | undefined, toolName: s
   if (exact) return exact;
   const normalized = toolName.replace(/-/g, "_");
   return metadata.find(m => m.name.replace(/-/g, "_") === normalized);
+}
+
+/** Whether the schema formatter has field descriptions worth showing beside a compact shape. */
+export function hasSchemaDescriptions(schema: unknown, includeRoot = false): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const s = schema as Record<string, unknown>;
+  if (includeRoot && typeof s.description === "string" && s.description.length > 0) return true;
+  const hasNestedDescription = (child: unknown) => hasSchemaDescriptions(child, true);
+  if (s.properties && typeof s.properties === "object" && !Array.isArray(s.properties)
+    && Object.values(s.properties).some(hasNestedDescription)) return true;
+  return hasNestedDescription(s.items)
+    || (Array.isArray(s.anyOf) && s.anyOf.some(hasNestedDescription))
+    || (Array.isArray(s.oneOf) && s.oneOf.some(hasNestedDescription));
 }
 
 export function formatSchema(schema: unknown, indent = "  "): string {

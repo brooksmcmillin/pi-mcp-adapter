@@ -86,6 +86,7 @@ export interface McpTool {
   title?: SdkTool["title"];
   description?: SdkTool["description"];
   inputSchema?: SdkTool["inputSchema"]; // JSON Schema
+  outputSchema?: SdkTool["outputSchema"]; // JSON Schema for structuredContent
   _meta?: SdkTool["_meta"];
 }
 
@@ -427,6 +428,8 @@ export interface ServerEntry {
   /** Explicit rmcp-mux Unix-domain socket path. Mutually exclusive with command and url. */
   socket?: string;
   env?: Record<string, string>;
+  /** Inherit the adapter process environment for stdio servers. Defaults to true; false keeps SDK platform defaults plus explicit env overlays. */
+  inheritEnv?: boolean;
   cwd?: string;
   // HTTP fields
   url?: string;
@@ -511,6 +514,17 @@ export interface McpOutputGuardSettings {
 
 // Settings
 export type ToolPrefix = "server" | "none" | "short" | "mcp";
+
+const ENCODED_SERVER_NAMESPACE_MARKER = "_mcpns_";
+
+export function formatServerNamespace(serverName: string): string {
+  const normalized = serverName.replace(/-/g, "_");
+  if (normalized === "" || (/^[A-Za-z0-9_]+$/.test(normalized) && !normalized.startsWith(ENCODED_SERVER_NAMESPACE_MARKER))) {
+    return normalized;
+  }
+  const codePoints = Array.from(normalized, character => character.codePointAt(0)!.toString(16)).join("_");
+  return `${ENCODED_SERVER_NAMESPACE_MARKER}${codePoints}`;
+}
 export type HostConfigDiscovery = "off" | "prompt" | "on";
 export type McpFooterStatus = "full" | "compact" | "off";
 
@@ -625,11 +639,21 @@ export interface McpSettings {
   oauthDir?: string;
 }
 
+export interface ClaudePluginConfig {
+  /** Explicit local Claude plugin directory. File-based config resolves relative paths from the active project cwd; createMcpAdapter snapshots programmatic paths against process.cwd(). */
+  path: string;
+  /** Load the plugin's root .mcp.json as low-precedence MCP defaults. */
+  mcp?: boolean;
+  /** Expose the plugin's root skills/ directory to Pi resource discovery. */
+  skills?: boolean;
+}
+
 // Root config
 export interface McpConfig {
   mcpServers: Record<string, ServerEntry>;
   imports?: ImportKind[];
   settings?: McpSettings;
+  claudePlugins?: ClaudePluginConfig[];
 }
 
 export interface McpAdapterOptions {
@@ -648,6 +672,7 @@ export interface ToolMetadata {
   uiResourceUri?: string; // For app-enabled tools: the UI resource URI
   uiVisibility?: UiToolVisibility[];
   inputSchema?: unknown;  // JSON Schema for parameters (stored for describe/errors)
+  outputSchema?: unknown; // Server schema for structuredContent (stored for describe)
   uiStreamMode?: UiStreamMode;
 }
 
@@ -686,6 +711,7 @@ export interface CachedTool {
   name: string;
   description?: string;
   inputSchema?: unknown;
+  outputSchema?: unknown;
   uiResourceUri?: string;
   uiVisibility?: UiToolVisibility[];
   uiStreamMode?: "eager" | "stream-first";
