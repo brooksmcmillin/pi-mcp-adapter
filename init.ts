@@ -112,9 +112,9 @@ export async function initializeMcp(
 ): Promise<McpExtensionState> {
   // Pi guards ExtensionContext getters after reload. Snapshot all values that
   // can be used by asynchronous work before the first await.
-  const configPath = options.config !== undefined
-    ? undefined
-    : options.configPath ?? (pi.getFlag("mcp-config") as string | undefined);
+  const configPath = options.config === undefined
+    ? options.configPath ?? (pi.getFlag("mcp-config") as string | undefined)
+    : undefined;
   const cwd = ctx.cwd;
   const hasUI = ctx.hasUI;
   const mode = ctx.mode;
@@ -138,10 +138,14 @@ export async function initializeMcp(
   }
   const ui = rawUi ? createOwnedUi(rawUi, owner) : undefined;
   const runtimeSignal = combineAbortSignals(owner.signal, initialSignal);
-  const config = options.config !== undefined
-    ? resolveConfiguredClaudePluginMcp(cloneMcpConfig(options.config), cwd)
-    : loadMcpConfig(configPath, cwd);
-  const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
+  const config = options.config === undefined
+    ? loadMcpConfig(configPath, cwd)
+    : resolveConfiguredClaudePluginMcp(cloneMcpConfig(options.config), cwd);
+  const authStorageOptions = getAuthStorageOptions(
+    config.settings?.oauthDir,
+    cwd,
+    config.settings?.oauthPersistence,
+  );
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;
   const oauthRuntime = options.oauthRuntime ?? createOAuthRuntime(owner.signal);
@@ -155,7 +159,7 @@ export async function initializeMcp(
   if (config.settings?.sampling !== false && (hasUI || samplingAutoApprove)) {
     manager.setSamplingConfig({
       autoApprove: samplingAutoApprove,
-      ...(ui !== undefined ? { ui } : {}),
+      ...(ui === undefined ? {} : { ui }),
       modelRegistry,
       getCurrentModel: () => owner.isActive() ? ctx.model : undefined,
       getSignal: () => owner.isActive()
@@ -209,8 +213,8 @@ export async function initializeMcp(
     failureTracker,
     failureMessages,
     approvedToolCalls,
-    ...(persistSessionApproval !== undefined ? { persistSessionApproval } : {}),
-    ...(sessionManager !== undefined ? { sessionManager } : {}),
+    ...(persistSessionApproval === undefined ? {} : { persistSessionApproval }),
+    ...(sessionManager === undefined ? {} : { sessionManager }),
     approvalEvents: pi.events,
     uiResourceHandler,
     consentManager,
@@ -221,10 +225,11 @@ export async function initializeMcp(
       await openUrl(pi, url, process.env.BROWSER, owner.signal);
       owner.throwIfInactive();
     },
-    ...(ui !== undefined ? { ui } : {}),
+    ...(ui === undefined ? {} : { ui }),
     sendMessage: (message, options) => {
       const deliver = () => {
         if (!owner.isActive()) return;
+        // SAFETY: McpExtensionState's message union mirrors Pi's sendMessage input while remaining decoupled from the host package type.
         pi.sendMessage(message as unknown as Parameters<typeof pi.sendMessage>[0], options);
       };
       if (!options?.triggerTurn) {
@@ -238,7 +243,7 @@ export async function initializeMcp(
         deliver();
       });
     },
-    ...(options.statusEvents !== undefined ? { statusEvents: options.statusEvents } : {}),
+    ...(options.statusEvents === undefined ? {} : { statusEvents: options.statusEvents }),
   };
   if (sessionManager) restoreSessionApprovalState(state, sessionBranch);
   if (ownsOAuthRuntime) owner.addCleanup(() => shutdownOAuth(oauthRuntime));
@@ -297,7 +302,7 @@ export async function initializeMcp(
     lifecycle.registerServer(
       name,
       definition,
-      idleOverride !== undefined ? { idleTimeout: idleOverride } : undefined
+      idleOverride === undefined ? undefined : { idleTimeout: idleOverride }
     );
     if (lifecycleMode === "keep-alive") {
       lifecycle.markKeepAlive(name, definition);
@@ -368,7 +373,7 @@ export async function initializeMcp(
         originalName: tool.name,
         description: tool.description ?? "",
       })),
-      ...(definition.exposeResources !== false ? connection.resources.filter(resource => resource?.name && resource?.uri).map(resource => {
+      ...(definition.exposeResources === false ? [] : connection.resources.filter(resource => resource?.name && resource?.uri).map(resource => {
         const originalName = `read_${resourceNameToToolName(resource.name)}`;
         return {
           name: formatToolName(originalName, name, effectivePrefix),
@@ -376,7 +381,7 @@ export async function initializeMcp(
           description: resource.description ?? `Read resource: ${resource.uri}`,
           resourceUri: resource.uri,
         };
-      }) : []),
+      })),
     ];
     startupKnownMetadata.set(name, metadata);
   }
@@ -598,10 +603,10 @@ export function updateMetadataCache(
     configHash,
     tools,
     resources,
-    ...(prompts !== undefined ? { prompts } : {}),
-    ...(connection.instructions !== undefined ? { instructions: connection.instructions } : {}),
-    ...(connection.toolListHints?.ttlMs !== undefined ? { ttlMs: connection.toolListHints.ttlMs } : {}),
-    ...(connection.toolListHints?.cacheScope !== undefined ? { cacheScope: connection.toolListHints.cacheScope } : {}),
+    ...(prompts === undefined ? {} : { prompts }),
+    ...(connection.instructions === undefined ? {} : { instructions: connection.instructions }),
+    ...(connection.toolListHints?.ttlMs === undefined ? {} : { ttlMs: connection.toolListHints.ttlMs }),
+    ...(connection.toolListHints?.cacheScope === undefined ? {} : { cacheScope: connection.toolListHints.cacheScope }),
     cachedAt: Date.now(),
   };
 

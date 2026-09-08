@@ -194,13 +194,11 @@ export function resolveDirectTools(
       } else if (envSelection.tools.has(serverName)) {
         toolFilter = [...envSelection.tools.get(serverName)!];
       }
-    } else {
-      if (definition.directTools !== undefined) {
+    } else if (definition.directTools !== undefined) {
         toolFilter = definition.directTools;
       } else if (globalDirect) {
         toolFilter = globalDirect;
       }
-    }
 
     if (!toolFilter) continue;
 
@@ -247,9 +245,9 @@ export function resolveDirectTools(
         originalName: tool.name,
         prefixedName,
         description: tool.description ?? "",
-        ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
-        ...(tool.uiResourceUri !== undefined ? { uiResourceUri: tool.uiResourceUri } : {}),
-        ...(tool.uiStreamMode !== undefined ? { uiStreamMode: tool.uiStreamMode } : {}),
+        ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+        ...(tool.uiResourceUri === undefined ? {} : { uiResourceUri: tool.uiResourceUri }),
+        ...(tool.uiStreamMode === undefined ? {} : { uiStreamMode: tool.uiStreamMode }),
       });
     }
 
@@ -408,7 +406,7 @@ export function createDirectToolExecutor(
       }
       const failedAgo = getFailureAgeSeconds(state, spec.serverName);
       return {
-        content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not available${failedAgo !== null ? ` (failed ${failedAgo}s ago)` : ""}` }],
+        content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not available${failedAgo === null ? "" : ` (failed ${failedAgo}s ago)`}` }],
         details: { error: "server_unavailable", server: spec.serverName },
       };
     }
@@ -421,15 +419,16 @@ export function createDirectToolExecutor(
       };
     }
 
-    const normalizedParams = spec.resourceUri ? params : normalizeToolArguments(params);
+    let normalizedParams = spec.resourceUri ? params : normalizeToolArguments(params);
+    const modelVisibleParams = normalizedParams;
     const approval = await ensureToolCallApproved(state, spec.serverName, {
       name: spec.prefixedName,
       originalName: spec.originalName,
       description: spec.description,
-      ...(spec.inputSchema !== undefined ? { inputSchema: spec.inputSchema } : {}),
-      ...(spec.resourceUri !== undefined ? { resourceUri: spec.resourceUri } : {}),
-      ...(spec.uiResourceUri !== undefined ? { uiResourceUri: spec.uiResourceUri } : {}),
-      ...(spec.uiStreamMode !== undefined ? { uiStreamMode: spec.uiStreamMode } : {}),
+      ...(spec.inputSchema === undefined ? {} : { inputSchema: spec.inputSchema }),
+      ...(spec.resourceUri === undefined ? {} : { resourceUri: spec.resourceUri }),
+      ...(spec.uiResourceUri === undefined ? {} : { uiResourceUri: spec.uiResourceUri }),
+      ...(spec.uiStreamMode === undefined ? {} : { uiStreamMode: spec.uiStreamMode }),
     }, normalizedParams, ownedSignal, spec.resourceUri ? "resource" : "direct");
     if (approval.ok === false) {
       const denied = approval.reason === "denied";
@@ -511,15 +510,15 @@ export function createDirectToolExecutor(
         ? await maybeStartUiSession(state, {
             serverName: spec.serverName,
             toolName: spec.originalName,
-            toolArgs: normalizedParams,
+            toolArgs: modelVisibleParams,
             uiResourceUri: spec.uiResourceUri!,
-            ...(spec.uiStreamMode !== undefined ? { streamMode: spec.uiStreamMode } : {}),
+            ...(spec.uiStreamMode === undefined ? {} : { streamMode: spec.uiStreamMode }),
             ...(signal ? { signal } : {}),
             onNeedsAuth: recoverAuthConnection,
           })
         : null;
 
-      const result = await withSessionRecovery<ClientCallToolResult>(
+      let result = await withSessionRecovery<ClientCallToolResult>(
         {
           manager: state.manager,
           config: state.config,

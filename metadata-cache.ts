@@ -59,7 +59,7 @@ export function saveMetadataCache(cache: MetadataCache): void {
   const dir = dirname(cachePath);
   mkdirSync(dir, { recursive: true });
 
-  let merged: MetadataCache = { version: CACHE_VERSION, servers: {} };
+  const merged: MetadataCache = { version: CACHE_VERSION, servers: {} };
   try {
     if (existsSync(cachePath)) {
       const existing = JSON.parse(readFileSync(cachePath, "utf-8")) as MetadataCache;
@@ -175,9 +175,9 @@ export function getMissingConfiguredDirectToolServers(
     if (isServerDisabled(definition)) continue;
     const hasDirectTools = envSelection
       ? envSelection.servers.has(serverName) || envSelection.tools.has(serverName)
-      : definition.directTools !== undefined
-        ? !!definition.directTools
-        : !!globalDirect;
+      : definition.directTools === undefined
+        ? !!globalDirect
+        : !!definition.directTools;
 
     if (!hasDirectTools) continue;
 
@@ -230,11 +230,11 @@ export function reconstructToolMetadata(
       name,
       originalName: tool.name,
       description: tool.description ?? "",
-      ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
-      ...(tool.outputSchema !== undefined ? { outputSchema: tool.outputSchema } : {}),
-      ...(tool.uiResourceUri !== undefined ? { uiResourceUri: tool.uiResourceUri } : {}),
-      ...(tool.uiVisibility !== undefined ? { uiVisibility: tool.uiVisibility } : {}),
-      ...(tool.uiStreamMode !== undefined ? { uiStreamMode: tool.uiStreamMode } : {}),
+      ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+      ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
+      ...(tool.uiResourceUri === undefined ? {} : { uiResourceUri: tool.uiResourceUri }),
+      ...(tool.uiVisibility === undefined ? {} : { uiVisibility: tool.uiVisibility }),
+      ...(tool.uiStreamMode === undefined ? {} : { uiStreamMode: tool.uiStreamMode }),
     });
   }
 
@@ -297,12 +297,12 @@ export function serializeTools(tools: McpTool[]): CachedTool[] {
       const uiStreamMode = extractToolUiStreamMode(t._meta);
       return {
         name: t.name,
-        ...(t.description !== undefined ? { description: t.description } : {}),
-        ...(t.inputSchema !== undefined ? { inputSchema: t.inputSchema } : {}),
-        ...(t.outputSchema !== undefined ? { outputSchema: t.outputSchema } : {}),
-        ...(uiResourceUri !== undefined ? { uiResourceUri } : {}),
-        ...(uiVisibility !== undefined ? { uiVisibility } : {}),
-        ...(uiStreamMode !== undefined ? { uiStreamMode } : {}),
+        ...(t.description === undefined ? {} : { description: t.description }),
+        ...(t.inputSchema === undefined ? {} : { inputSchema: t.inputSchema }),
+        ...(t.outputSchema === undefined ? {} : { outputSchema: t.outputSchema }),
+        ...(uiResourceUri === undefined ? {} : { uiResourceUri }),
+        ...(uiVisibility === undefined ? {} : { uiVisibility }),
+        ...(uiStreamMode === undefined ? {} : { uiStreamMode }),
       };
     });
 }
@@ -313,7 +313,7 @@ export function serializeResources(resources: McpResource[]): CachedResource[] {
     .map(r => ({
       uri: r.uri,
       name: r.name,
-      ...(r.description !== undefined ? { description: r.description } : {}),
+      ...(r.description === undefined ? {} : { description: r.description }),
     }));
 }
 
@@ -322,14 +322,14 @@ export function serializePrompts(prompts: McpPrompt[]): CachedPrompt[] {
     .filter(prompt => prompt?.name)
     .map(prompt => ({
       name: prompt.name,
-      ...(prompt.title !== undefined ? { title: prompt.title } : {}),
-      ...(prompt.description !== undefined ? { description: prompt.description } : {}),
+      ...(prompt.title === undefined ? {} : { title: prompt.title }),
+      ...(prompt.description === undefined ? {} : { description: prompt.description }),
       ...(Array.isArray(prompt.arguments)
         ? {
             arguments: prompt.arguments.filter(argument => argument?.name).map(argument => ({
               name: argument.name,
-              ...(argument.description !== undefined ? { description: argument.description } : {}),
-              ...(argument.required !== undefined ? { required: argument.required } : {}),
+              ...(argument.description === undefined ? {} : { description: argument.description }),
+              ...(argument.required === undefined ? {} : { required: argument.required }),
             })),
           }
         : {}),
@@ -347,15 +347,15 @@ export function reconstructPromptMetadata(
     const args: McpPromptArgument[] = Array.isArray(prompt.arguments)
       ? prompt.arguments.filter(argument => argument?.name).map(argument => ({
           name: argument.name,
-          ...(argument.description !== undefined ? { description: argument.description } : {}),
-          ...(argument.required !== undefined ? { required: argument.required } : {}),
+          ...(argument.description === undefined ? {} : { description: argument.description }),
+          ...(argument.required === undefined ? {} : { required: argument.required }),
         }))
       : [];
     return {
       serverName,
       originalName: prompt.name,
       commandName: formatPromptCommandName(prompt.name, serverName, effectivePrefix),
-      ...(prompt.title !== undefined ? { title: prompt.title } : {}),
+      ...(prompt.title === undefined ? {} : { title: prompt.title }),
       description: prompt.description ?? "",
       arguments: args,
     };

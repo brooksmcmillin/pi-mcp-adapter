@@ -2332,6 +2332,7 @@ describe("mcpAdapter session lifecycle", () => {
       expect.any(Object),
       expect.any(AbortSignal),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      state.authStorageOptions,
     );
     expect(mocks.reconnectServer).toHaveBeenCalledWith(state, expect.any(Object), "github");
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
@@ -2361,6 +2362,7 @@ describe("mcpAdapter session lifecycle", () => {
       expect.any(Object),
       expect.any(AbortSignal),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      state.authStorageOptions,
     );
     expect(mocks.reconnectServer).not.toHaveBeenCalled();
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();

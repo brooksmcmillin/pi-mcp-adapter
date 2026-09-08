@@ -217,7 +217,7 @@ async function loadConfiguredDiscoveryState(
 ): Promise<OAuthDiscoveryState> {
   const response = await fetch(metadataUrl, {
     headers: { accept: "application/json" },
-    ...(signal !== undefined ? { signal } : {}),
+    ...(signal === undefined ? {} : { signal }),
   })
   if (!response.ok) {
     await response.text().catch(() => {})
@@ -339,8 +339,8 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (this.usesClientCredentials) {
       return {
         client_name: this.config.clientName ?? defaultClientName(),
-        ...(this.clientUri !== undefined ? { client_uri: this.clientUri } : {}),
-        ...(this.config.logoUri !== undefined ? { logo_uri: this.config.logoUri } : {}),
+        ...(this.clientUri === undefined ? {} : { client_uri: this.clientUri }),
+        ...(this.config.logoUri === undefined ? {} : { logo_uri: this.config.logoUri }),
         redirect_uris: [],
         grant_types: ["client_credentials"],
         token_endpoint_auth_method: this.config.clientSecret ? "client_secret_post" : "none",
@@ -355,12 +355,12 @@ export class McpOAuthProvider implements OAuthClientProvider {
     return {
       redirect_uris: [redirectUrl],
       client_name: this.config.clientName ?? defaultClientName(),
-      ...(this.clientUri !== undefined ? { client_uri: this.clientUri } : {}),
-      ...(this.config.logoUri !== undefined ? { logo_uri: this.config.logoUri } : {}),
+      ...(this.clientUri === undefined ? {} : { client_uri: this.clientUri }),
+      ...(this.config.logoUri === undefined ? {} : { logo_uri: this.config.logoUri }),
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: this.config.clientSecret ? "client_secret_post" : "none",
-      ...(this.config.scope !== undefined ? { scope: this.config.scope } : {}),
+      ...(this.config.scope === undefined ? {} : { scope: this.config.scope }),
     }
   }
 
@@ -370,7 +370,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    */
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
     if (this.invalidatedClientId !== undefined) {
-      invalidateAuthEntryCache(this.serverName)
+      invalidateAuthEntryCache(this.serverName, this.storageOptions)
     }
     const issuer = this.discoveredIssuer
     const stored = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
@@ -399,7 +399,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       return {
         client_id: this.config.clientId,
         client_secret: clientSecret,
-        ...(issuer !== undefined ? { issuer } : {}),
+        ...(issuer === undefined ? {} : { issuer }),
       } as IssuerBoundClientInformation
     }
 
@@ -450,16 +450,16 @@ export class McpOAuthProvider implements OAuthClientProvider {
       return {
         client_id: clientInfo.clientId,
         client_secret: clientInfo.clientSecret,
-        ...(clientInfo.clientIdIssuedAt !== undefined
-          ? { client_id_issued_at: clientInfo.clientIdIssuedAt }
-          : {}),
-        ...(clientInfo.clientSecretExpiresAt !== undefined
-          ? { client_secret_expires_at: clientInfo.clientSecretExpiresAt }
-          : {}),
-        ...(clientInfo.redirectUris !== undefined
-          ? { redirect_uris: clientInfo.redirectUris }
-          : {}),
-        ...(clientInfo.issuer !== undefined ? { issuer: clientInfo.issuer } : {}),
+        ...(clientInfo.clientIdIssuedAt === undefined
+          ? {}
+          : { client_id_issued_at: clientInfo.clientIdIssuedAt }),
+        ...(clientInfo.clientSecretExpiresAt === undefined
+          ? {}
+          : { client_secret_expires_at: clientInfo.clientSecretExpiresAt }),
+        ...(clientInfo.redirectUris === undefined
+          ? {}
+          : { redirect_uris: clientInfo.redirectUris }),
+        ...(clientInfo.issuer === undefined ? {} : { issuer: clientInfo.issuer }),
       } as IssuerBoundClientInformation
     }
 
@@ -478,7 +478,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         this.serverName,
         {
           clientId: info.client_id,
-          ...(issuer !== undefined ? { issuer } : {}),
+          ...(issuer === undefined ? {} : { issuer }),
           configPreRegistered: true,
         },
         this.serverUrl,
@@ -491,11 +491,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
       ?? (this.redirectUrl ? [this.redirectUrl] : undefined)
     const clientInfo: StoredClientInfo = {
       clientId: info.client_id,
-      ...(info.client_secret !== undefined ? { clientSecret: info.client_secret } : {}),
-      ...(info.client_id_issued_at !== undefined ? { clientIdIssuedAt: info.client_id_issued_at } : {}),
-      ...(info.client_secret_expires_at !== undefined ? { clientSecretExpiresAt: info.client_secret_expires_at } : {}),
-      ...(redirectUris !== undefined ? { redirectUris } : {}),
-      ...(issuer !== undefined ? { issuer } : {}),
+      ...(info.client_secret === undefined ? {} : { clientSecret: info.client_secret }),
+      ...(info.client_id_issued_at === undefined ? {} : { clientIdIssuedAt: info.client_id_issued_at }),
+      ...(info.client_secret_expires_at === undefined ? {} : { clientSecretExpiresAt: info.client_secret_expires_at }),
+      ...(redirectUris === undefined ? {} : { redirectUris }),
+      ...(issuer === undefined ? {} : { issuer }),
     }
     this.flowClientInfo = clientInfo
     this.invalidatedClientId = undefined
@@ -511,7 +511,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     // Once this provider rejects a token, bypass its process-local cache until
     // another process replaces that token in shared secure storage.
     if (this.invalidatedAccessToken !== undefined) {
-      invalidateAuthEntryCache(this.serverName)
+      invalidateAuthEntryCache(this.serverName, this.storageOptions)
     }
 
     // Use getAuthForUrl to validate tokens are for the current server URL.
@@ -538,13 +538,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
     const issuer = this.discoveredIssuer ?? (tokens as IssuerBoundTokens).issuer
     const storedTokens: StoredTokens = {
       accessToken: tokens.access_token,
-      ...(tokens.refresh_token !== undefined ? { refreshToken: tokens.refresh_token } : {}),
+      ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }),
       // Preserve expiry even when expires_in is 0 (e.g. the SDK re-saving an
       // already-expired token) so expired tokens stay expired instead of
       // being persisted as never-expiring.
-      ...(tokens.expires_in !== undefined ? { expiresAt: Date.now() / 1000 + tokens.expires_in } : {}),
-      ...(tokens.scope !== undefined ? { scope: tokens.scope } : {}),
-      ...(issuer !== undefined ? { issuer } : {}),
+      ...(tokens.expires_in === undefined ? {} : { expiresAt: Date.now() / 1000 + tokens.expires_in }),
+      ...(tokens.scope === undefined ? {} : { scope: tokens.scope }),
+      ...(issuer === undefined ? {} : { issuer }),
     }
     this.throwIfInactive()
     updateTokens(this.serverName, storedTokens, this.serverUrl, this.storageOptions)
@@ -679,7 +679,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         this.invalidatedClientId = this.lastObservedClientId
         this.lastObservedClientId = undefined
         this.flowClientInfo = undefined
-        invalidateAuthEntryCache(this.serverName)
+        invalidateAuthEntryCache(this.serverName, this.storageOptions)
         break
       case "tokens":
         // Invalidation is provider-local. Persistently deleting a shared token
@@ -692,7 +692,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         if (this.staleRedirectClientId !== undefined) {
           this.invalidatedClientId = this.staleRedirectClientId
         }
-        invalidateAuthEntryCache(this.serverName)
+        invalidateAuthEntryCache(this.serverName, this.storageOptions)
         break
       case "verifier":
         clearCodeVerifier(this.serverName, this.storageOptions)

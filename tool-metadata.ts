@@ -107,11 +107,11 @@ export function buildToolMetadata(
       name,
       originalName: tool.name,
       description: tool.description ?? "",
-      ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
-      ...(tool.outputSchema !== undefined ? { outputSchema: tool.outputSchema } : {}),
-      ...(uiResourceUri !== undefined ? { uiResourceUri } : {}),
-      ...(uiVisibility !== undefined ? { uiVisibility } : {}),
-      ...(uiStreamMode !== undefined ? { uiStreamMode } : {}),
+      ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+      ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
+      ...(uiResourceUri === undefined ? {} : { uiResourceUri }),
+      ...(uiVisibility === undefined ? {} : { uiVisibility }),
+      ...(uiStreamMode === undefined ? {} : { uiStreamMode }),
     });
   }
 

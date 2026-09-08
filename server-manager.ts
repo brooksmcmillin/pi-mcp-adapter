@@ -271,6 +271,10 @@ export class McpServerManager {
     this.authStorageOptions = options;
   }
 
+  getAuthStorageOptions(): AuthStorageOptions {
+    return this.authStorageOptions;
+  }
+
   setOAuthRuntime(runtime: McpOAuthRuntime): void {
     this.oauthRuntime = runtime;
   }
@@ -300,7 +304,7 @@ export class McpServerManager {
 
     return {
       ...(ownedSignal ? { signal: ownedSignal } : {}),
-      ...(timeout !== undefined ? { timeout } : {}),
+      ...(timeout === undefined ? {} : { timeout }),
     };
   }
 
@@ -823,7 +827,7 @@ export class McpServerManager {
           definition.literalEnv === true,
           definition.inheritEnv !== false,
         ),
-        ...(cwd !== undefined ? { cwd } : {}),
+        ...(cwd === undefined ? {} : { cwd }),
         stderr: definition.debug ? "inherit" : "pipe",
       });
       // Keep non-debug child diagnostics available for connection failures without
@@ -891,7 +895,7 @@ export class McpServerManager {
         toolsRevision: 0,
         resources: [],
         prompts: [],
-        ...(instructions !== undefined ? { instructions } : {}),
+        ...(instructions === undefined ? {} : { instructions }),
         lastUsedAt: Date.now(),
         inFlight: 0,
         status: "connected",
@@ -949,7 +953,7 @@ export class McpServerManager {
       // behind needs-auth.
       if (isUnauthorizedHttpError(error) && supportsOAuth(definition) && cleanupFailures.length === 0) {
         if (!invalidated) {
-          invalidateAuthEntryCache(name);
+          invalidateAuthEntryCache(name, this.authStorageOptions);
           invalidated = true;
         }
         return {
@@ -1265,9 +1269,9 @@ export class McpServerManager {
     > => {
       const authProvider = "provider" in authState ? authState.provider : undefined;
       const transportOptions = {
-        ...(requestInit !== undefined ? { requestInit } : {}),
-        ...(requestFetch !== undefined ? { fetch: requestFetch } : {}),
-        ...(authProvider !== undefined ? { authProvider } : {}),
+        ...(requestInit === undefined ? {} : { requestInit }),
+        ...(requestFetch === undefined ? {} : { fetch: requestFetch }),
+        ...(authProvider === undefined ? {} : { authProvider }),
         ...(authProvider !== undefined
           && definition.oauth !== false
           && definition.oauth?.skipIssuerMetadataValidation === true
@@ -1320,7 +1324,7 @@ export class McpServerManager {
       if (isUnauthorizedHttpError(result.error)) {
         if (supportsOAuth(definition)) {
           if (!invalidated) {
-            invalidateAuthEntryCache(serverName);
+            invalidateAuthEntryCache(serverName, this.authStorageOptions);
             invalidated = true;
           }
           return {
@@ -1358,8 +1362,8 @@ export class McpServerManager {
           : undefined;
         if (ttlMs !== undefined || cacheScope !== undefined) {
           hints = {
-            ...(ttlMs !== undefined ? { ttlMs } : {}),
-            ...(cacheScope !== undefined ? { cacheScope } : {}),
+            ...(ttlMs === undefined ? {} : { ttlMs }),
+            ...(cacheScope === undefined ? {} : { cacheScope }),
           };
         }
         firstPage = false;
@@ -1368,7 +1372,7 @@ export class McpServerManager {
       cursor = result.nextCursor;
     } while (cursor);
 
-    return { tools: allTools, ...(hints !== undefined ? { hints } : {}) };
+    return { tools: allTools, ...(hints === undefined ? {} : { hints }) };
   }
 
   private async fetchAllPrompts(
