@@ -437,6 +437,13 @@ export interface McpSettings {
     /** Explicitly use AES-256-GCM files keyed by PI_MCP_ADAPTER_OAUTH_FILE_KEY instead of the OS credential store. */
     oauthCredentialStore?: "encrypted-file";
     /**
+     * OAuth credential lifetime. `persistent` (default) uses the operating-system
+     * credential store. `session` keeps tokens and dynamic client registration in
+     * memory for one adapter session, isolating concurrent Pi sessions and
+     * requiring authorization again after session replacement or process exit.
+     */
+    oauthPersistence?: "persistent" | "session";
+    /**
      * Legacy OAuth tokens.json import directory.
      * Relative paths are resolved from the project root (cwd).
      * Takes precedence over the agent's mcp-oauth/ legacy import directory but
@@ -444,7 +451,8 @@ export interface McpSettings {
      *
      * Persistent OAuth credentials are stored in the operating system credential
      * store, not this directory. Existing plaintext tokens.json files found here
-     * are imported once and removed.
+     * are imported once and removed. Session-scoped OAuth never imports legacy
+     * credentials.
      */
     oauthDir?: string;
 }
