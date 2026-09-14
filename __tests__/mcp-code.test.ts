@@ -141,6 +141,70 @@ describe("runMcpScript", () => {
     expect(payload.error.message).not.toContain("mcp({ search:");
   });
 
+  it.each([
+    "claim_task",
+    "resolve_and_claim_task",
+    "resolve_blocker_and_claim_task",
+    "create_task_blocker",
+    "replace_task_blocker",
+    "renew_task_claim",
+    "release_task_claim",
+    "checkpoint_and_release_task_claim",
+    "complete_task",
+    "complete_task_from_pr",
+    "resolve_task_as_already_resolved",
+    "set_agent_status",
+  ])("rejects TaskManager lifecycle aliases inside mcpScript: %s", async (operation) => {
+    for (const toolName of [operation, `taskmanager_${operation}`, `taskmanager.${operation.replaceAll("_", "-")}`]) {
+      const result = await executeCall(state, toolName, {}, undefined, undefined, undefined, "script");
+
+      expect(result).toMatchObject({
+        details: {
+          error: "script_taskmanager_lifecycle",
+          requestedTool: toolName,
+        },
+      });
+      expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("direct mcp") });
+    }
+  });
+
+  it("rejects configured-server lifecycle aliases after metadata resolution", async () => {
+    const configuredState = {
+      ...state,
+      config: { settings: {}, mcpServers: { configured: definition } },
+      toolMetadata: new Map([["configured", [{ name: "configured_claim_task", originalName: "claim_task" }]]]),
+    } as unknown as McpExtensionState;
+
+    const result = await executeCall(configuredState, "configured_claim_task", {}, undefined, undefined, undefined, "script");
+
+    expect(result).toMatchObject({ details: { error: "script_taskmanager_lifecycle", requestedTool: "claim_task" } });
+  });
+
+  it("does not apply the script guard to direct MCP dispatch or read-only calls", async () => {
+    const dispatchState = {
+      ...state,
+      config: { settings: {}, mcpServers: { taskmanager: definition } },
+      toolMetadata: new Map([["taskmanager", [
+        { name: "taskmanager_claim_task", originalName: "claim_task" },
+        { name: "taskmanager_get_task", originalName: "get_task" },
+      ]]]),
+    } as unknown as McpExtensionState;
+
+    await manager.connect("taskmanager", definition);
+    const direct = await executeCall(dispatchState, "taskmanager_claim_task");
+    const readOnly = await executeCall(dispatchState, "taskmanager_get_task", {}, undefined, undefined, undefined, "script");
+
+    expect(direct).toMatchObject({ details: { server: "taskmanager" } });
+    expect(direct.details).not.toMatchObject({ error: "script_taskmanager_lifecycle" });
+    expect(readOnly).toMatchObject({ details: { server: "taskmanager" } });
+  });
+
+  it("does not reject unrelated names that merely contain a lifecycle suffix", async () => {
+    const result = await executeCall(state, "read_claim_task", {}, undefined, undefined, undefined, "script");
+
+    expect(result.details).not.toMatchObject({ error: "script_taskmanager_lifecycle" });
+  });
+
   it("searches the script-visible tool catalog with pagination and server filtering", async () => {
     const result = await runMcpScript(
       state,

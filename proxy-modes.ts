@@ -34,6 +34,41 @@ const REGEX_SAFETY_CHECK_PARAMS = {
   timeout: 250,
 } as const;
 
+const SCRIPT_BLOCKED_TASKMANAGER_OPERATIONS = new Set([
+  "claim_task",
+  "resolve_and_claim_task",
+  "resolve_blocker_and_claim_task",
+  "create_task_blocker",
+  "replace_task_blocker",
+  "renew_task_claim",
+  "release_task_claim",
+  "checkpoint_and_release_task_claim",
+  "complete_task",
+  "complete_task_from_pr",
+  "resolve_task_as_already_resolved",
+  "set_agent_status",
+]);
+
+function normalizeToolOperationName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function isScriptBlockedTaskManagerOperation(name: string): boolean {
+  const normalized = normalizeToolOperationName(name);
+  if (SCRIPT_BLOCKED_TASKMANAGER_OPERATIONS.has(normalized)) return true;
+  const taskmanagerPrefix = "taskmanager_";
+  return normalized.startsWith(taskmanagerPrefix)
+    && SCRIPT_BLOCKED_TASKMANAGER_OPERATIONS.has(normalized.slice(taskmanagerPrefix.length));
+}
+
+function blockedScriptTaskManagerResult(toolName: string): ProxyToolResult {
+  const message = `TaskManager lifecycle mutation "${toolName}" cannot run inside mcpScript. Call it through the direct mcp({ tool: "${toolName}" }) route instead.`;
+  return {
+    content: [{ type: "text" as const, text: message }],
+    details: { mode: "call", error: "script_taskmanager_lifecycle", requestedTool: toolName, message },
+  };
+}
+
 type AutoAuthResult =
   | { status: "skipped" }
   | { status: "success" }
@@ -929,6 +964,9 @@ export async function executeCall(
 ): Promise<ProxyToolResult> {
   const ownedSignal = combineAbortSignals(state.owner?.signal, signal);
   throwIfAborted(ownedSignal);
+  if (origin === "script" && isScriptBlockedTaskManagerOperation(toolName)) {
+    return blockedScriptTaskManagerResult(toolName);
+  }
   let serverName: string | undefined = serverOverride;
   let toolMeta: ToolMetadata | undefined;
   let autoAuthAttempted = false;
@@ -1143,6 +1181,10 @@ export async function executeCall(
       content: [{ type: "text" as const, text: msg }],
       details: { mode: "call", error: "tool_not_found", requestedTool: toolName, hintServer, suggestions },
     };
+  }
+
+  if (origin === "script" && isScriptBlockedTaskManagerOperation(toolMeta.originalName)) {
+    return blockedScriptTaskManagerResult(toolMeta.originalName);
   }
 
   const callIdentity = toolMeta.resourceUri
