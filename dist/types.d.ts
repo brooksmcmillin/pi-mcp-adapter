@@ -231,8 +231,10 @@ export interface OAuthConfig {
     grantType?: "authorization_code" | "client_credentials";
     /** Pre-registered client ID (optional, dynamic registration used if not provided) */
     clientId?: string;
-    /** Client secret for confidential clients */
+    /** Client secret for confidential clients; requires an explicit clientId when clientMetadataUrl is set. */
     clientSecret?: string;
+    /** Operator-supplied public HTTPS Client ID Metadata Document URL (SEP-991); opt-in, with DCR remaining the default. */
+    clientMetadataUrl?: string;
     /** Requested OAuth scopes */
     scope?: string;
     /** Extra authorization URL parameters for provider-specific extensions. Flow-owned parameters cannot be overridden. */
@@ -272,6 +274,8 @@ export interface ServerEntry {
     inheritEnv?: boolean;
     cwd?: string;
     url?: string;
+    /** PEM CA bundle replacing default roots for this HTTPS MCP origin only. */
+    caFile?: string;
     headers?: Record<string, string>;
     /** Add or replace HTTP headers by running a trusted command for each request. */
     requestHeadersCommand?: HttpRequestHeadersCommand;
@@ -297,7 +301,7 @@ export interface ServerEntry {
     idleTimeout?: number;
     requestTimeoutMs?: number;
     exposeResources?: boolean;
-    directTools?: boolean | string[];
+    directTools?: boolean | string[] | "search";
     toolPrefix?: ToolPrefix;
     includeTools?: string[];
     excludeTools?: string[];
@@ -376,11 +380,13 @@ export interface McpSettings {
     notifyOnStartupConnect?: boolean;
     /** Discover detected host-specific MCP configs only when explicitly enabled. */
     hostConfigDiscovery?: HostConfigDiscovery;
+    /** Trusted HOME-contained roots from which to discover ancestor project configs. */
+    ancestorConfigRoots?: string[];
     /** Agent Plugin package directories to load MCP servers from. */
     agentPluginPaths?: string[];
     idleTimeout?: number;
     requestTimeoutMs?: number;
-    directTools?: boolean;
+    directTools?: boolean | "search";
     /**
      * Validate direct-tool inputs against the advertised schema after recovering
      * one JSON string layer for object and array properties. Defaults to false.
@@ -428,6 +434,8 @@ export interface McpSettings {
      * instruction when unset.
      */
     authRequiredMessage?: string;
+    /** Explicitly use AES-256-GCM files keyed by PI_MCP_ADAPTER_OAUTH_FILE_KEY instead of the OS credential store. */
+    oauthCredentialStore?: "encrypted-file";
     /**
      * Legacy OAuth tokens.json import directory.
      * Relative paths are resolved from the project root (cwd).
@@ -479,6 +487,8 @@ export interface PromptMetadata {
     arguments: McpPromptArgument[];
 }
 export interface DirectToolSpec {
+    /** Registered inactive; `mcp({ search })` activates it (directTools: "search"). */
+    lazy?: boolean;
     serverName: string;
     originalName: string;
     prefixedName: string;

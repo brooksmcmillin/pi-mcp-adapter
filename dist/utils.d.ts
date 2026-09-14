@@ -1,11 +1,17 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { McpConfig, ServerEntry } from "./types.ts";
+export declare function parseJsonWithComments(raw: string): unknown;
+/** Resolve a candidate only when its real path stays within the real root. */
+export declare function resolveRealContainedPath(root: string, candidate: string, allowMissing?: boolean): string | null;
+export declare function resolveContainedPath(root: string, candidate: string): string | null;
+export declare function stableStringify(value: unknown): string;
 export declare function openUrl(pi: ExtensionAPI, url: string, browser?: string, signal?: AbortSignal): Promise<void>;
 export declare function openPath(pi: ExtensionAPI, targetPath: string): Promise<void>;
 export declare function parallelLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]>;
 export declare function getConfigPathFromArgv(): string | undefined;
 export declare function interpolateEnvVars(value: string): string;
 export declare function interpolateEnvVars(value: string, environment: NodeJS.ProcessEnv): string;
+export declare function getMissingEnvVars(value: string, environment?: NodeJS.ProcessEnv): string[];
 export declare function toStringRecord(value: unknown): Record<string, string> | undefined;
 export declare function interpolateEnvRecord(values: Record<string, string> | undefined, environment?: NodeJS.ProcessEnv): Record<string, string> | undefined;
 /** Resolve a secret value, executing only a single leading `!` command marker. */

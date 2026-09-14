@@ -3,10 +3,11 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "
 import { dirname } from "node:path";
 import { getAgentPath } from "./agent-dir.js";
 import { createHash } from "node:crypto";
+import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { getToolUiResourceUri } from "./ui-app-bridge-helpers.js";
 import { createToolSelectorCandidateIndex, formatPromptCommandName, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix } from "./types.js";
 import { resourceNameToToolName } from "./resource-tools.js";
-import { extractToolUiStreamMode, interpolateEnvRecord, interpolateEnvVars, resolveBearerToken, resolveConfigPath, resolveServerUrl, } from "./utils.js";
+import { extractToolUiStreamMode, interpolateEnvRecord, interpolateEnvVars, resolveBearerToken, resolveConfigPath, resolveServerUrl, stableStringify, } from "./utils.js";
 import { extractUiToolVisibility, isUiToolVisibleToModel } from "./ui-tool-visibility.js";
 const CACHE_VERSION = 1;
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -61,10 +62,10 @@ export function computeServerHash(definition, environment = process.env) {
         command: definition.command,
         args: definition.args,
         socket: resolveConfigPath(definition.socket, environment),
-        env: interpolateEnvRecord(definition.env, environment),
-        cwd: resolveConfigPath(definition.cwd, environment),
+        env: isBuiltInAgentPlugin(definition, "env") ? definition.env : interpolateEnvRecord(definition.env, environment),
+        cwd: isBuiltInAgentPlugin(definition, "cwd") ? definition.cwd : resolveConfigPath(definition.cwd, environment),
         url: resolveServerUrl(definition, environment),
-        headers: interpolateEnvRecord(definition.headers, environment),
+        headers: isBuiltInAgentPlugin(definition, "headers") ? definition.headers : interpolateEnvRecord(definition.headers, environment),
         requestHeadersCommand: definition.requestHeadersCommand
             ? {
                 command: interpolateEnvVars(definition.requestHeadersCommand.command, environment),
@@ -297,18 +298,6 @@ export function reconstructPromptMetadata(serverName, prompts, prefix, definitio
             arguments: args,
         };
     });
-}
-function stableStringify(value) {
-    if (value === null || value === undefined || typeof value !== "object") {
-        const serialized = JSON.stringify(value);
-        return serialized === undefined ? "undefined" : serialized;
-    }
-    if (Array.isArray(value)) {
-        return `[${value.map(v => stableStringify(v)).join(",")}]`;
-    }
-    const obj = value;
-    const keys = Object.keys(obj).sort();
-    return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 function tryGetToolUiResourceUri(tool) {
     try {

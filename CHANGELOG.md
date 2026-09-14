@@ -9,31 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Script `tools.describe()` now exposes server-advertised output schemas for `data.structuredContent`, preserved through metadata caching and refresh. (#522)
-- Stdio MCP servers can opt out of arbitrary adapter environment inheritance with `inheritEnv: false`; SDK platform defaults and explicit `env` overlays remain. Thanks to [@zenolam](https://github.com/zenolam) for #509.
-- Local Claude plugin bundles can now be loaded from trusted configured directories, including bundled MCP servers and skills. Thanks to [@gugu91](https://github.com/gugu91) for PR #493.
-- OAuth credentials can opt into adapter-session-only storage with `settings.oauthPersistence: "session"`, isolating concurrent Pi sessions without changing configured server names or persisting tokens.
-- OAuth loopback redirects can use `{port}` with `localhost`, `127.0.0.1`, or `::1` when a provider permits RFC 8252 dynamic ports. Thanks to [@nrutman](https://github.com/nrutman) for PR #483.
-- Runtime MCP status snapshots now include each server's `directToolCount`, the number of direct tools currently registered with Pi, including resource tools. Thanks to [@FischLu](https://github.com/FischLu) for #482.
+- OAuth credentials can use session-only storage with `settings.oauthPersistence: "session"`, isolating concurrent Pi sessions without persisting tokens.
+
+## [2.34.0] - 2026-09-14
+
+### Highlights
+
+- Start Pi faster while keeping cached MCP tools, prompts, and commands immediately available.
+- Connect to more OAuth servers with Client ID Metadata Documents.
+- Store OAuth credentials securely in encrypted files when Windows OpenSSH or a headless session cannot use the OS credential store.
+- Load shared configuration and Agent Plugin MCP servers more reliably.
+- Use MCP Apps, private HTTPS servers, and frequently changing tool catalogs with fewer connection problems.
+
+### Added
+
+- Windows OpenSSH/network logons can explicitly select externally keyed AES-256-GCM OAuth credential files with `settings.oauthCredentialStore: "encrypted-file"`; error 1312 now points to this option, while the OS store remains the default with no automatic fallback. Thanks to [@pierreh](https://github.com/pierreh) for issue #574.
+- OAuth servers can explicitly opt into operator-hosted Client ID Metadata Documents (SEP-991) with `oauth.clientMetadataUrl`; URL-only/default configurations continue using Dynamic Client Registration. Existing DCR refresh credentials get their normal refresh attempt before migration to CIMD after invalidation. Thanks to [@dsluo](https://github.com/dsluo) for PR #571.
+- User-global or explicitly selected config can opt in to bounded ancestor `.mcp.json` and `<configDir>/mcp.json` discovery with `settings.ancestorConfigRoots`. Discovery is off by default; project files cannot enable or widen it, and the deepest matching existing directory under `$HOME` bounds farthest-first loading. Thanks to [@johnhenaot](https://github.com/johnhenaot) for PR #555.
 
 ### Changed
 
-- MCP setup and server panels now use Pi's active theme and TUI components while preserving their existing workflows. (#488)
-- MCP sampling requests now route through Pi's `ModelRegistry.complete`, leaving provider authentication, environment, and base URL handling to the host.
-- `mcp({ connect })` now reports the direct tools it discovers on the tool result via `addedToolNames`, Pi's result-scoped tool activation surface, so they load from that transcript point instead of through an active-tool list rewrite. (#490) Thanks to [@chiptoe-svg](https://github.com/chiptoe-svg) for PR #494.
+- Runtime-heavy MCP modules now load only when first needed, while cached tools, prompts, and commands remain immediately available. Thanks to [@thefakepaulgg](https://github.com/thefakepaulgg) for PR #576.
+- OAuth dependencies now use published MCP SDK releases again, restoring normal npm installs and removing the standalone native-addon dependency. Cross-process OAuth transaction serialization remains unavailable until the official SDK exposes the required support.
 
 ### Fixed
 
-- Script calls now preserve full intermediate data for filtering within a fixed 16 MiB cumulative transfer budget, returning `intermediate_result_too_large` when exhausted while retaining final-output guards. (#520)
+- Built-in Agent Plugin MCP definitions now preserve literal values through connection and cache handling, validate manifest field types, resolve contained paths through symlinks, and expand plugin placeholders once. Thanks to [@cheetahbyte](https://github.com/cheetahbyte) for #570.
+- Empty, whitespace-only, or comments-only optional MCP config layers are now treated as absent, allowing other precedence layers to load without a warning. Thanks to [@RobertoNegro](https://github.com/RobertoNegro) for PR #567.
+- macOS Keychain and Linux Secret Service now keep ordinary OAuth records in one credential item and compact existing chunks on ordinary reads; Windows Credential Manager retains chunking. Thanks to [@jploskonka](https://github.com/jploskonka) for PR #560.
+- Configured direct tools now hot-load from fresh live catalogs even when a server advertises `ttlMs: 0`, while persisted zero-TTL metadata remains non-cacheable. Thanks to [@dsluo](https://github.com/dsluo) for PR #562. (#561)
+- Switching a server between transports (HTTP to stdio command or socket) now drops an inherited `bearerTokenStore` flag alongside the other URL-bound credential fields. Thanks to [@zhulinchng](https://github.com/zhulinchng) for PR #552.
+- Per-origin `caFile` trust now routes same-origin requests through the bundled undici fetch so the custom CA dispatcher matches the fetch implementation on newer Node releases (Node 26 ships undici v8 while the dependency pins undici v6); previously every `caFile` connection failed with `UND_ERR_INVALID_ARG`. Thanks to [@zhulinchng](https://github.com/zhulinchng) for PR #550.
+- MCP Apps now load provider-declared asset, connection, and frame domains through a session-bound sandbox resource navigation with response-level CSP enforcement. Thanks to [@tekumara](https://github.com/tekumara) for #548.
+
+## [2.33.0] - 2026-09-10
+
+### Highlights
+- Install MCP servers from a URL and complete browser OAuth without leaving the scripting workflow.
+- Keep large tool catalogs out of context until search activates the tools you need.
+- Use OAuth more reliably across multiple Pi processes, private gateways, stalled providers, and dynamic loopback callbacks.
+- Connect to private HTTPS servers with custom CA bundles and run stdio servers with tighter environment isolation.
+- Inspect richer tool schemas and filter larger intermediate results safely in MCP scripts.
+
+### Added
+- HTTPS MCP servers can use an origin-scoped `caFile` PEM trust bundle for Streamable HTTP and SSE without disabling certificate verification. Thanks to [@desmonna](https://github.com/desmonna) for #527.
+- `directTools: "search"` keeps direct tools inactive until `mcp({ search })` finds and activates them. Search-mode tools do not count toward the 75-tool advisory. Thanks to [@chiptoe-svg](https://github.com/chiptoe-svg) for PR #525.
+- Install MCP servers from a URL with `mcp({ action: "install", url: "..." })`. Thanks to [@exoulster](https://github.com/exoulster) for PR #532.
+- Script `tools.describe()` now exposes server-advertised output schemas for `data.structuredContent`, including after metadata refreshes. (#522)
+- Stdio MCP servers can set `inheritEnv: false` while retaining platform defaults and explicit `env` values. Thanks to [@zenolam](https://github.com/zenolam) for #509.
+- Local Claude plugin bundles can now be loaded from trusted configured directories, including bundled MCP servers and skills. Thanks to [@gugu91](https://github.com/gugu91) for PR #493.
+- OAuth loopback redirects can use `{port}` with `localhost`, `127.0.0.1`, or `::1` when a provider permits RFC 8252 dynamic ports. Thanks to [@nrutman](https://github.com/nrutman) for PR #483.
+- Runtime MCP status now includes each server's registered direct-tool count, including resource tools. Thanks to [@FischLu](https://github.com/FischLu) for #482.
+
+### Changed
+- Approval brokers now observe and can gate cached MCP calls; session grants apply only on abstention or no claim. Thanks to [@yanqianglu](https://github.com/yanqianglu) for #534.
+- MCP setup and server panels now follow Pi's active theme and TUI components. (#488)
+- MCP sampling requests now route through Pi's `ModelRegistry.complete`, leaving provider authentication, environment, and base URL handling to the host.
+- `mcp({ connect })` now activates newly discovered direct tools from the connection result, so they become available at the correct point in the transcript. (#490) Thanks to [@chiptoe-svg](https://github.com/chiptoe-svg) for PR #494.
+- OAuth transaction support uses pinned MCP SDK preview builds until the supporting SDK release is available on npm.
+
+### Fixed
+- macOS HTTP connection failures to literal private/link-local IPs now retain network details and suggest Local Network Privacy checks without assuming a privacy denial. Thanks to [@tdhooghe](https://github.com/tdhooghe) for #543.
+- OAuth credential updates now coordinate across Pi processes, release cleanly after failures and cancellation, and keep callback tokens bound to the client that requested them. Optional `PI_MCP_OAUTH_LOG` diagnostics identify transactions without logging credentials. Thanks to [@CharlesMcMillan](https://github.com/CharlesMcMillan) for PR #528.
+- MCP runtime cancellation now works on Node 20.0.0 when `AbortSignal.any` is unavailable. (#537)
+- OAuth now forwards configured service headers to same-origin discovery, registration, token exchange, and refresh requests, enabling authentication behind service-token gateways without leaking credentials to other origins. Thanks to [@ethanbrown3](https://github.com/ethanbrown3) for PR #533 and [@Davasny](https://github.com/Davasny) for reporting #530.
+- Script `mcp({ action: "auth-start" })` now opens the authorization URL and watches the loopback callback to complete OAuth automatically, while retaining pasted `auth-complete` as a fallback. Thanks to [@exoulster](https://github.com/exoulster) for PR #532.
+- Namespace proxy tool names now stay within provider limits without creating collisions for long server names. Thanks to [@saikpr](https://github.com/saikpr) for PR #529.
+- Script calls now preserve intermediate data for filtering within a fixed 16 MiB cumulative transfer budget while retaining final-output limits. (#520)
 - Namespace proxy argument guidance now uses exact search-result tool names for schema inspection. Thanks to [@r1ckyIn](https://github.com/r1ckyIn) for PR #519.
 - Script `tools.describe()` now retains documented input field guidance alongside compact parameter shapes, including formats and units. (#521)
 - Early MCP tool discovery now honors `--mcp-config=<path>`, including paths containing `=`. (#512)
-- The repository lock now resolves `qs` to patched 6.16.0 for its published moderate advisories. (#517)
+- Updated `qs` to patched version 6.16.0. (#517)
 - The optional `@earendil-works/pi-ai` peer now supports Pi 0.85 alongside 0.84.1, avoiding npm resolution conflicts. Thanks to [@dyld-w](https://github.com/dyld-w) for #507.
 - Session-scoped MCP tool approvals and MCP App iframe consent now persist on and restore from the active Pi session branch. (#492)
-- The `/mcp` panel no longer marks reconnects as cached when cache reload returns no entry, while preserving explicit zero-TTL behavior. Thanks to [@fyq163](https://github.com/fyq163) for #497.
+- The `/mcp` panel no longer marks reconnects as cached when no cache entry was restored. Thanks to [@fyq163](https://github.com/fyq163) for #497.
 - MCP output truncation now uses Pi host truncation semantics and formatting while preserving MCP artifact spill behavior.
-- The repository lockfile now pins Ajv's transitive `fast-uri` dependency to patched 3.1.7, avoiding the stale 3.1.5 advisory finding. Thanks to [@escuelallenquen](https://github.com/escuelallenquen) for #513.
+- Updated Ajv's transitive `fast-uri` dependency to patched version 3.1.7. Thanks to [@escuelallenquen](https://github.com/escuelallenquen) for #513.
 - Exclusive mode now honors an explicit `--mcp-config` override instead of always loading the agent-global configuration. Thanks to [@willem445](https://github.com/willem445) for #496.
 - OAuth discovery, dynamic registration, token exchange, and token refresh requests now have a timeout and honor cancellation instead of hanging the agent on stalled providers. Thanks to [@west-david](https://github.com/west-david) for #485 and PR #486.
 - OAuth redirect URI mismatches now preserve refreshable credentials and re-register stale dynamic clients after `invalid_grant`. Thanks to [@CharlesMcMillan](https://github.com/CharlesMcMillan) for PR #495.

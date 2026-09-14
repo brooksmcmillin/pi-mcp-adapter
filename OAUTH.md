@@ -7,7 +7,8 @@ This document describes the OAuth 2.1 + PKCE authentication implementation for t
 The Pi MCP Adapter uses the official MCP SDK's built-in OAuth implementation, which provides:
 
 - **Automatic OAuth endpoint discovery** (RFC 9728) - No manual configuration needed
-- **Dynamic Client Registration fallback** (RFC 7591) - Used when no pre-registered `clientId` is configured and the server supports registration
+- **Dynamic Client Registration** (RFC 7591) - The default for URL-only servers when no pre-registered `clientId` is configured and the server supports registration
+- **Client ID Metadata Documents** (SEP-991) - An advanced opt-in that uses an operator-supplied public HTTPS metadata URL as `client_id` when the authorization server opts in
 - **Automatic callback handling** - Built-in HTTP server handles callbacks automatically
 - **Automatic token refresh** - SDK handles token refresh transparently
 
@@ -16,7 +17,8 @@ The Pi MCP Adapter uses the official MCP SDK's built-in OAuth implementation, wh
 - **PKCE (S256)** - Mandatory code challenge method for OAuth 2.1
 - **Automatic Callback Server** - Local browser redirects automatically when available
 - **Manual Remote Flow** - Copy auth URLs and pasted redirect URLs/codes for headless SSH sessions
-- **Dynamic Client Registration fallback** - Registers when no pre-registered `clientId` is configured and the server supports registration
+- **Dynamic Client Registration** - Registers by default when no pre-registered client is configured and the server supports registration
+- **Client ID Metadata Documents** - Opts into a configured, operator-hosted URL-based client ID when the authorization server advertises support
 - **Auto-Discovery** - Discovers OAuth endpoints from server metadata
 - **Automatic Token Refresh** - SDK handles expired tokens automatically
 - **State Parameter Validation** - CSRF protection
@@ -42,8 +44,10 @@ OAuth is automatically enabled for HTTP servers. The SDK will:
 
 - Auto-detect if the server requires OAuth
 - Discover OAuth endpoints from the server
-- Use Dynamic Client Registration fallback when no pre-registered client is configured and the server supports it
+- Use Dynamic Client Registration when no pre-registered client is configured and the server supports it
 - Handle the entire OAuth flow including callback
+
+Pi does not configure or host a Client ID Metadata Document by default. URL-only configurations continue to use Dynamic Client Registration. CIMD is available only through the advanced, operator-supplied `oauth.clientMetadataUrl` option below.
 
 ### Optional Configuration
 
@@ -73,8 +77,9 @@ You can optionally provide a pre-registered client:
 - `url` - The MCP server URL (required)
 - `auth` - Set to `"oauth"` to force OAuth, `false` to disable, or omit to auto-detect
 - `oauth.grantType` - `"authorization_code"` (default, browser flow) or `"client_credentials"` (non-interactive)
-- `oauth.clientId` - Pre-registered client ID. MCP 2026 prefers pre-registered clients or Client ID Metadata Documents; this adapter falls back to Dynamic Client Registration when the ID is omitted and the server supports it.
-- `oauth.clientSecret` - Client secret for confidential clients (optional)
+- `oauth.clientId` - Pre-registered client ID. Takes precedence over `oauth.clientMetadataUrl` when both are configured.
+- `oauth.clientSecret` - Client secret for confidential clients (optional). When `oauth.clientMetadataUrl` is also set, an explicit `oauth.clientId` is required; the explicit client takes precedence.
+- `oauth.clientMetadataUrl` - Advanced opt-in for an operator-supplied public HTTPS Client ID Metadata Document URL with a non-root path. The URL is used as `client_id` when the authorization server advertises `client_id_metadata_document_supported: true`; otherwise Dynamic Client Registration remains the fallback. The document must be publicly fetchable and match this client's metadata, especially `redirect_uris`. The adapter does not provide a default URL or host this document.
 - `oauth.scope` - Requested OAuth scopes (optional)
 - `oauth.authorizationParams` - Extra authorization URL parameters for provider-specific extensions, such as Google's `{ "access_type": "offline", "prompt": "consent" }`. Flow-owned parameters like `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `response_type`, and `resource` cannot be overridden.
 - `oauth.redirectUri` - Browser callback URI to advertise and bind, such as `http://localhost:3118/callback`. Use `{port}` in a loopback URI when the provider permits an OS-assigned RFC 8252 port, for example `http://127.0.0.1:{port}/callback` (optional)
@@ -124,7 +129,7 @@ This will:
 
 1. Start the callback server lazily on an OS-assigned local port, on an OS-assigned host-specific `{port}` callback, or on the exact `oauth.redirectUri` port for fixed callbacks
 2. Discover OAuth endpoints automatically
-3. Use Dynamic Client Registration fallback when no `clientId` is configured and the server supports registration
+3. Use Dynamic Client Registration by default, or the explicitly configured Client ID Metadata Document when supported
 4. Open your browser for authentication
 5. Wait for the automatic callback
 6. Complete the OAuth flow
@@ -171,6 +176,12 @@ To clear stored OAuth credentials and force a fresh authorization:
 /mcp logout my-oauth-server
 ```
 
+Within one Pi process, logout is a linearizable boundary: OAuth work that began
+before logout cannot recreate credentials after they are cleared, and new OAuth
+work is admitted after logout finishes. Explicit token updates made through the
+public API retain last-writer semantics. Separate Pi processes are intentionally
+not coordinated, so concurrent cross-process credential operations can still race.
+
 ## How It Works
 
 ### Authentication Flow
@@ -201,9 +212,11 @@ The SDK attempts to discover OAuth endpoints using:
 1. **RFC 9728 Metadata** - Fetches `/.well-known/oauth-protected-resource`
 2. **WWW-Authenticate Header** - Parses `resource_metadata` from 401 responses
 
-### Dynamic Client Registration fallback
+### Client ID Metadata Documents and Dynamic Registration
 
-MCP 2026 prefers pre-registered clients or Client ID Metadata Documents. The adapter exposes pre-registered `oauth.clientId` today. It does not publish an HTTPS Client ID Metadata Document yet, so when no `clientId` is provided the SDK uses Dynamic Client Registration as a fallback if the server supports it:
+CIMD is an advanced, explicit opt-in. Set `oauth.clientMetadataUrl` to a stable, operator-supplied public HTTPS URL that serves this client's OAuth metadata. When authorization-server discovery advertises `client_id_metadata_document_supported: true`, the adapter and SDK use that URL directly as `client_id` and skip Dynamic Client Registration. The URL must have a non-root path. An explicit `oauth.clientId` takes precedence. Combining `oauth.clientMetadataUrl` with `oauth.clientSecret` without an explicit `oauth.clientId` is rejected.
+
+The adapter does not provide a default URL or host the public document: operators must publish it and keep fields such as `redirect_uris`, `grant_types`, `response_types`, and `token_endpoint_auth_method` consistent with the configured flow. URL-only/default Pi configurations therefore continue to use Dynamic Client Registration. When the server does not advertise CIMD support, or no metadata URL is configured, the SDK uses Dynamic Client Registration if the server supports it:
 
 1. Discovers the registration endpoint from OAuth metadata
 2. Registers a new client with:
@@ -232,9 +245,15 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 Persistent OAuth entries are stored per configured server name in the operating system credential store, using macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret through `@napi-rs/keyring`. The stored entry contains tokens, dynamic client information, legacy verifier/state fields when present, and the server URL binding.
 
-With `settings.oauthPersistence: "session"`, each adapter session instead owns a separate in-memory credential store and OAuth-flow identity. Tokens and dynamic client registration are shared only within that adapter session. Concurrent Pi sessions using the same server name and URL cannot read or overwrite one another's credentials, and session replacement or process exit discards the store. This mode never reads, migrates, removes, or writes persistent or legacy credentials.
+With `settings.oauthPersistence: "session"`, each adapter session instead owns a separate in-memory credential store and OAuth-flow identity. Tokens and dynamic client registration are shared only within that adapter session. Concurrent Pi sessions using the same server name and URL cannot read or overwrite one another's credentials, and session replacement or process exit discards the store. This mode never reads, migrates, removes, or writes persistent or legacy credentials. Session mode takes precedence over `settings.oauthCredentialStore`; encrypted-file storage applies only to persistent credentials.
 
-The adapter fails closed when the OS credential store is unavailable. On headless Linux, configure an unlocked Secret Service-compatible keyring before using persistent OAuth; the adapter does not silently fall back to plaintext token files.
+Windows Credential Manager cannot hold a typical large OAuth JSON blob in one value, so payloads over 1,000 UTF-16 code units are stored as a manifest plus chunks; the size-limited test store uses the same representation. macOS Keychain and Linux Secret Service keep each record in one item, including ordinary 8–10 KiB records; if an unusually large record exceeds the native store's actual limit, that store error is surfaced. This avoids separate prompts for digest-addressed Keychain chunks. On macOS and Linux, the first ordinary read of a previously chunked record validates and rewrites it as one item before cleaning up its old chunks. Windows and the size-limited test store retain the chunked representation. Status inspection reads the existing representation but does not compact it; existing secure-record and legacy-plaintext cleanup semantics still apply.
+
+The adapter fails closed when the OS credential store is unavailable. On headless Linux, configure an unlocked Secret Service-compatible keyring before using persistent OAuth; the adapter does not silently fall back to plaintext token files. Windows OpenSSH network logons may report `ERROR_NO_SUCH_LOGON_SESSION` (1312) because Credential Manager has no credential set for that logon.
+
+For Windows OpenSSH/headless use, `settings.oauthCredentialStore: "encrypted-file"` explicitly selects an AES-256-GCM file store. It requires `PI_MCP_ADAPTER_OAUTH_FILE_KEY` to contain canonical base64 for exactly 32 random bytes; generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` and inject it through an external secret mechanism. Never place the key in config or beside the ciphertext. One authenticated, versioned envelope is stored per hashed server account at `<Pi agent directory>/mcp-oauth-encrypted/sha256-<server-hash>/credentials.json`. The server URL and secrets appear only inside ciphertext, and account-bound authenticated data prevents copying an envelope to another account.
+
+Encrypted-file writes use private directory/file modes where supported and same-directory atomic replacement. POSIX modes are checked on reads, but they do not establish a Windows ACL; encryption with the external key is the confidentiality boundary. This backend never falls back to the OS store, reads `oauthDir` / `MCP_OAUTH_DIR`, or imports legacy plaintext. Reauthenticate after opting in. Key loss or rotation makes existing envelopes unreadable; remove them and reauthenticate with the new key.
 
 On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter makes one best-effort retry through `keyctl session - node <packaged helper>`. This lets explicit re-authentication write fresh credentials from a new session keyring without restarting a long-lived tmux or server process. The recovery path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
 
@@ -242,7 +261,7 @@ Complete credential entries are held in memory for the lifetime of the Pi proces
 
 A credential changed or deleted by another process while Pi is running is not observed immediately. The affected server picks it up after the first credential-backed authentication failure in that `needs-auth` episode: Pi discards the cached entry, and the following read reloads from the credential store. Restarting Pi also clears the cache. Set `PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1` to turn the cache off entirely and restore a credential-store read per request.
 
-Older versions stored plaintext entries at `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`, or under `settings.oauthDir` / `MCP_OAUTH_DIR`. On first read after upgrade, a valid legacy entry is imported into the OS credential store and the plaintext `tokens.json` file is removed. These directories are now legacy import locations, not persistent credential stores or isolation namespaces.
+Older versions stored plaintext entries at `~/.pi/agent/mcp-oauth/sha256-<server-hash>/tokens.json`, or under `settings.oauthDir` / `MCP_OAUTH_DIR`. With the default OS backend, the first read after upgrade imports a valid legacy entry and removes the plaintext `tokens.json`. The encrypted-file backend leaves legacy files untouched. These directories are legacy import locations, not persistent credential stores or isolation namespaces.
 
 The stored `serverUrl` field ensures credentials are invalidated if the server URL changes.
 
@@ -264,11 +283,11 @@ For private servers with known-broken metadata, `oauth.skipIssuerMetadataValidat
 
 When an MCP server does not publish usable protected-resource metadata, configure `oauth.authServerMetadataUrl` with the HTTPS URL of its OAuth/OIDC authorization-server metadata document. That document is authoritative instead of MCP protected-resource discovery, and its issuer is still checked by default. Treat this as trusted configuration and point it only at a metadata endpoint you explicitly trust.
 
-### OS Credential Store
+### Credential Stores
 
-Persistent OAuth credentials are written to the OS credential store. Legacy plaintext files are read only for one-way migration and are removed after successful import. On Linux, revoked session-keyring errors can be retried once through a fresh `keyctl session` helper during explicit re-authentication. Session-scoped OAuth remains in process memory and does not inspect either storage location.
+Persistent OAuth credentials are written to the OS credential store by default, or only to the encrypted file store when explicitly selected. Legacy plaintext files are read only for one-way migration to the default OS store and are removed after successful import. On Linux, revoked session-keyring errors can be retried once through a fresh `keyctl session` helper during explicit re-authentication. Session-scoped OAuth remains in process memory and does not inspect either storage location.
 
-Credential entries reside in process memory for the lifetime of the Pi process on every supported credential-store platform rather than being re-read per request. They are never written anywhere but the OS credential store, and the process-memory copy is discarded on exit.
+Credential entries reside in process memory for the lifetime of the Pi process rather than being re-read per request, and the process-memory copy is discarded on exit.
 
 ### URL Validation
 
@@ -349,5 +368,6 @@ const transport = new StreamableHTTPClientTransport(url, {
 - [MCP Authorization Specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
 - [OAuth 2.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11)
 - [PKCE (RFC 7636)](https://datatracker.ietf.org/doc/html/rfc7636)
+- [OAuth Client ID Metadata Document](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-client-id-metadata-document-00)
 - [Dynamic Client Registration (RFC 7591)](https://datatracker.ietf.org/doc/html/rfc7591)
 - [OAuth Protected Resource Metadata (RFC 9728)](https://datatracker.ietf.org/doc/html/rfc9728)

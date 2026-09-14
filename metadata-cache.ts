@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "
 import { dirname } from "node:path";
 import { getAgentPath } from "./agent-dir.ts";
 import { createHash } from "node:crypto";
+import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts";
 import { getToolUiResourceUri } from "./ui-app-bridge-helpers.ts";
 import type {
   CachedPrompt,
@@ -28,6 +29,7 @@ import {
   resolveBearerToken,
   resolveConfigPath,
   resolveServerUrl,
+  stableStringify,
 } from "./utils.ts";
 import { extractUiToolVisibility, isUiToolVisibleToModel } from "./ui-tool-visibility.ts";
 
@@ -87,10 +89,10 @@ export function computeServerHash(definition: ServerEntry, environment: NodeJS.P
     command: definition.command,
     args: definition.args,
     socket: resolveConfigPath(definition.socket, environment),
-    env: interpolateEnvRecord(definition.env, environment),
-    cwd: resolveConfigPath(definition.cwd, environment),
+    env: isBuiltInAgentPlugin(definition, "env") ? definition.env : interpolateEnvRecord(definition.env, environment),
+    cwd: isBuiltInAgentPlugin(definition, "cwd") ? definition.cwd : resolveConfigPath(definition.cwd, environment),
     url: resolveServerUrl(definition, environment),
-    headers: interpolateEnvRecord(definition.headers, environment),
+    headers: isBuiltInAgentPlugin(definition, "headers") ? definition.headers : interpolateEnvRecord(definition.headers, environment),
     requestHeadersCommand: definition.requestHeadersCommand
       ? {
           command: interpolateEnvVars(definition.requestHeadersCommand.command, environment),
@@ -360,19 +362,6 @@ export function reconstructPromptMetadata(
       arguments: args,
     };
   });
-}
-
-function stableStringify(value: unknown): string {
-  if (value === null || value === undefined || typeof value !== "object") {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? "undefined" : serialized;
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(v => stableStringify(v)).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 
 function tryGetToolUiResourceUri(tool: McpTool): string | undefined {

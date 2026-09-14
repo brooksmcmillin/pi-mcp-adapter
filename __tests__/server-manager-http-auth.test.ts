@@ -3,11 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAuthEntryFilePath, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
+import { clearAllCredentials, getAuthEntryFilePath, getAuthForUrl, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
 
 type OAuthProviderLike = {
   redirectUrl?: string;
   tokens?: () => Promise<unknown>;
+  clientInformation?: () => Promise<unknown>;
+  saveTokens?: (tokens: { access_token: string; token_type: string }) => Promise<void>;
+  saveDiscoveryState?: (state: { authorizationServerUrl: string }) => Promise<void>;
   clientMetadata?: {
     redirect_uris?: string[];
     client_name?: string;
@@ -35,6 +38,7 @@ type HttpTransportMock = {
 const mocks = vi.hoisted(() => ({
   afterConnect: undefined as (() => void) | undefined,
   clients: [] as any[],
+  connectGates: [] as Promise<void>[],
   connectErrors: [] as unknown[],
   httpTransports: [] as HttpTransportMock[],
   sseTransports: [] as HttpTransportMock[],
@@ -49,6 +53,8 @@ vi.mock("@modelcontextprotocol/client", async (importOriginal) => ({
       setRequestHandler: vi.fn(),
       setNotificationHandler: vi.fn(),
       connect: vi.fn(async () => {
+        const gate = mocks.connectGates.shift();
+        if (gate) await gate;
         const error = mocks.connectErrors.shift();
         if (error !== undefined) throw error;
         mocks.afterConnect?.();
@@ -94,6 +100,7 @@ describe("McpServerManager HTTP bearer auth", () => {
     resetTestAuthSecretStore();
     mocks.afterConnect = undefined;
     mocks.clients.length = 0;
+    mocks.connectGates.length = 0;
     mocks.connectErrors.length = 0;
     mocks.httpTransports.length = 0;
     mocks.sseTransports.length = 0;
@@ -313,6 +320,28 @@ describe("McpServerManager HTTP bearer auth", () => {
     expect(await authProvider!.tokens?.()).toMatchObject({ access_token: "stored-token" });
   });
 
+  it("does not let a deferred anonymous attempt acquire OAuth authority after logout", async () => {
+    let release!: () => void;
+    mocks.connectGates.push(new Promise<void>(resolve => { release = resolve; }));
+    mocks.connectErrors.push(new SdkHttpError(
+      SdkErrorCode.ClientHttpAuthentication,
+      "HTTP 401",
+      { status: 401 },
+    ));
+    const { removeAuth } = await import("../mcp-auth-flow.ts");
+    const { McpServerManager } = await import("../server-manager.ts");
+    const manager = new McpServerManager();
+
+    const pending = manager.connect("deferred-logout", { url: "https://example.test/mcp" });
+    expect(mocks.httpTransports).toHaveLength(1);
+    expect(mocks.httpTransports[0].options.authProvider).toBeUndefined();
+    await removeAuth("deferred-logout");
+    release();
+
+    await expect(pending).rejects.toThrow("OAuth flow is no longer active");
+    expect(mocks.httpTransports).toHaveLength(1);
+  });
+
   it("keeps implicit OAuth deferred when the credential store is unavailable", async () => {
     const { McpServerManager } = await import("../server-manager.ts");
     process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = "unavailable";
@@ -488,4 +517,34 @@ describe("McpServerManager HTTP bearer auth", () => {
     expect(mocks.httpTransports).toHaveLength(1);
     expect(mocks.clients[0].connect).toHaveBeenCalledWith(mocks.httpTransports[0], { timeout: 5000 });
   });
+
+  it("scopes transport OAuth defaults instead of forwarding requestInit headers to discovered origins", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    const originalFetch = globalThis.fetch;
+    const seen: Headers[] = [];
+    globalThis.fetch = vi.fn(async (_input, init) => {
+      seen.push(new Headers(init?.headers));
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const manager = new McpServerManager();
+    try {
+      await manager.connect("scoped", {
+        url: "https://service.example.test/mcp",
+        auth: "oauth",
+        headers: { "x-service-auth": "synthetic-service", Authorization: "service-authorization" },
+      });
+      const options = mocks.httpTransports.at(-1)!.options;
+      expect(options.requestInit).toBeUndefined();
+      await options.fetch!("https://service.example.test/token", { headers: { authorization: "Basic sdk" } });
+      await options.fetch!("https://identity.example.test/token", { headers: { authorization: "Basic sdk" } });
+      expect(seen[0]!.get("x-service-auth")).toBe("synthetic-service");
+      expect(seen[0]!.get("authorization")).toBe("Basic sdk");
+      expect(seen[1]!.get("x-service-auth")).toBeNull();
+      expect(seen[1]!.get("authorization")).toBe("Basic sdk");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await manager.closeAll();
+    }
+  });
+
 });

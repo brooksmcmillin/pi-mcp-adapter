@@ -95,6 +95,23 @@ describe("package.json files", () => {
 });
 
 describe("package.json dependency policy", () => {
+  it("uses only registry semver dependency specs and no native refresh-lock addon", () => {
+    const dependencyGroups = [
+      packageJson.dependencies ?? {},
+      packageJson.devDependencies ?? {},
+      packageJson.peerDependencies ?? {},
+    ];
+    const registrySemver = /^(?:[~^]?\d+\.\d+\.\d+|\*)(?:\s*\|\|\s*(?:[~^]?\d+\.\d+\.\d+|\*))*$/;
+
+    for (const dependencies of dependencyGroups) {
+      for (const spec of Object.values(dependencies)) {
+        expect(spec).toMatch(registrySemver);
+        expect(spec).not.toMatch(/^(?:https?:|git(?:\+[^:]+)?:|file:)/);
+      }
+    }
+    expect(packageJson.dependencies?.["fs-native-extensions"]).toBeUndefined();
+  });
+
   it("treats Pi host packages as optional peers with exact dev pins", () => {
     const entries = Object.entries(hostPeerPackages);
 

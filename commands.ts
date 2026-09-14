@@ -316,9 +316,10 @@ export async function authenticateServer(
       config.settings?.oauthDir,
       cwd,
       config.settings?.oauthPersistence,
+      config.settings?.oauthCredentialStore,
     );
     const status = await authenticate(serverName, serverUrl, definition, {
-      ...(authStorageOptions.baseDir || authStorageOptions.persistence ? { authStorageOptions } : {}),
+      ...(Object.keys(authStorageOptions).length > 0 ? { authStorageOptions } : {}),
       onAuthorizationUrl: () => {},
       onAuthorizationInput: async (authorizationUrl, inputSignal) => {
         if (inputSignal.aborted) return undefined;
@@ -369,27 +370,24 @@ export async function logoutServer(
 
   const signal = state.owner?.signal;
   try {
-    await removeAuth(serverName, { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime });
+    await state.manager.close(serverName);
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (ui) {
-      ui.notify(`Failed to clear OAuth credentials for "${serverName}": ${sanitizeTerminalText(message)}`, "error");
+      ui.notify(`Failed to close OAuth server "${serverName}"; credentials were not cleared: ${sanitizeTerminalText(message)}`, "error");
     }
     return { ok: false, message };
   }
 
   state.owner?.throwIfInactive();
   try {
-    await state.manager.close(serverName);
+    await removeAuth(serverName, { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime });
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (ui) {
-      ui.notify(
-        `OAuth credentials were cleared for "${serverName}", but its connection could not be closed: ${sanitizeTerminalText(message)}`,
-        "error",
-      );
+      ui.notify(`Failed to clear OAuth credentials for "${serverName}": ${sanitizeTerminalText(message)}`, "error");
     }
     return { ok: false, message };
   }
@@ -479,7 +477,7 @@ function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cw
   const discovery = getMcpStandardConfigSummary(configOverridePath, cwd);
   const onboardingState = loadOnboardingState();
   const sharedSources = discovery.sources.filter((source) =>
-    (source.id === "shared-project" || source.id === "shared-global") && source.serverCount > 0,
+    (source.id === "shared-project" || source.id === "shared-project-ancestor" || source.id === "shared-global") && source.serverCount > 0,
   );
   if (sharedSources.length === 0 || onboardingState.sharedConfigHintShown) {
     return { lines: [], fingerprint: null };
