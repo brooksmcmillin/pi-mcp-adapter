@@ -3,10 +3,11 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "
 import { dirname } from "node:path";
 import { getAgentPath } from "./agent-dir.js";
 import { createHash } from "node:crypto";
+import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { getToolUiResourceUri } from "./ui-app-bridge-helpers.js";
 import { createToolSelectorCandidateIndex, formatPromptCommandName, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix } from "./types.js";
 import { resourceNameToToolName } from "./resource-tools.js";
-import { extractToolUiStreamMode, interpolateEnvRecord, interpolateEnvVars, resolveBearerToken, resolveConfigPath, resolveServerUrl, } from "./utils.js";
+import { extractToolUiStreamMode, interpolateEnvRecord, interpolateEnvVars, resolveBearerToken, resolveConfigPath, resolveServerUrl, stableStringify, } from "./utils.js";
 import { extractUiToolVisibility, isUiToolVisibleToModel } from "./ui-tool-visibility.js";
 const CACHE_VERSION = 1;
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -35,7 +36,7 @@ export function saveMetadataCache(cache) {
     const cachePath = getMetadataCachePath();
     const dir = dirname(cachePath);
     mkdirSync(dir, { recursive: true });
-    let merged = { version: CACHE_VERSION, servers: {} };
+    const merged = { version: CACHE_VERSION, servers: {} };
     try {
         if (existsSync(cachePath)) {
             const existing = JSON.parse(readFileSync(cachePath, "utf-8"));
@@ -61,10 +62,10 @@ export function computeServerHash(definition, environment = process.env) {
         command: definition.command,
         args: definition.args,
         socket: resolveConfigPath(definition.socket, environment),
-        env: interpolateEnvRecord(definition.env, environment),
-        cwd: resolveConfigPath(definition.cwd, environment),
+        env: isBuiltInAgentPlugin(definition, "env") ? definition.env : interpolateEnvRecord(definition.env, environment),
+        cwd: isBuiltInAgentPlugin(definition, "cwd") ? definition.cwd : resolveConfigPath(definition.cwd, environment),
         url: resolveServerUrl(definition, environment),
-        headers: interpolateEnvRecord(definition.headers, environment),
+        headers: isBuiltInAgentPlugin(definition, "headers") ? definition.headers : interpolateEnvRecord(definition.headers, environment),
         requestHeadersCommand: definition.requestHeadersCommand
             ? {
                 command: interpolateEnvVars(definition.requestHeadersCommand.command, environment),
@@ -139,9 +140,9 @@ export function getMissingConfiguredDirectToolServers(config, cache, envOverride
             continue;
         const hasDirectTools = envSelection
             ? envSelection.servers.has(serverName) || envSelection.tools.has(serverName)
-            : definition.directTools !== undefined
-                ? !!definition.directTools
-                : !!globalDirect;
+            : definition.directTools === undefined
+                ? !!globalDirect
+                : !!definition.directTools;
         if (!hasDirectTools)
             continue;
         const serverCache = cache?.servers?.[serverName];
@@ -180,11 +181,11 @@ export function reconstructToolMetadata(serverName, entry, prefix, definition, c
             name,
             originalName: tool.name,
             description: tool.description ?? "",
-            ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
-            ...(tool.outputSchema !== undefined ? { outputSchema: tool.outputSchema } : {}),
-            ...(tool.uiResourceUri !== undefined ? { uiResourceUri: tool.uiResourceUri } : {}),
-            ...(tool.uiVisibility !== undefined ? { uiVisibility: tool.uiVisibility } : {}),
-            ...(tool.uiStreamMode !== undefined ? { uiStreamMode: tool.uiStreamMode } : {}),
+            ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+            ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
+            ...(tool.uiResourceUri === undefined ? {} : { uiResourceUri: tool.uiResourceUri }),
+            ...(tool.uiVisibility === undefined ? {} : { uiVisibility: tool.uiVisibility }),
+            ...(tool.uiStreamMode === undefined ? {} : { uiStreamMode: tool.uiStreamMode }),
         });
     }
     if (definition.exposeResources !== false) {
@@ -242,12 +243,12 @@ export function serializeTools(tools) {
         const uiStreamMode = extractToolUiStreamMode(t._meta);
         return {
             name: t.name,
-            ...(t.description !== undefined ? { description: t.description } : {}),
-            ...(t.inputSchema !== undefined ? { inputSchema: t.inputSchema } : {}),
-            ...(t.outputSchema !== undefined ? { outputSchema: t.outputSchema } : {}),
-            ...(uiResourceUri !== undefined ? { uiResourceUri } : {}),
-            ...(uiVisibility !== undefined ? { uiVisibility } : {}),
-            ...(uiStreamMode !== undefined ? { uiStreamMode } : {}),
+            ...(t.description === undefined ? {} : { description: t.description }),
+            ...(t.inputSchema === undefined ? {} : { inputSchema: t.inputSchema }),
+            ...(t.outputSchema === undefined ? {} : { outputSchema: t.outputSchema }),
+            ...(uiResourceUri === undefined ? {} : { uiResourceUri }),
+            ...(uiVisibility === undefined ? {} : { uiVisibility }),
+            ...(uiStreamMode === undefined ? {} : { uiStreamMode }),
         };
     });
 }
@@ -257,7 +258,7 @@ export function serializeResources(resources) {
         .map(r => ({
         uri: r.uri,
         name: r.name,
-        ...(r.description !== undefined ? { description: r.description } : {}),
+        ...(r.description === undefined ? {} : { description: r.description }),
     }));
 }
 export function serializePrompts(prompts) {
@@ -265,14 +266,14 @@ export function serializePrompts(prompts) {
         .filter(prompt => prompt?.name)
         .map(prompt => ({
         name: prompt.name,
-        ...(prompt.title !== undefined ? { title: prompt.title } : {}),
-        ...(prompt.description !== undefined ? { description: prompt.description } : {}),
+        ...(prompt.title === undefined ? {} : { title: prompt.title }),
+        ...(prompt.description === undefined ? {} : { description: prompt.description }),
         ...(Array.isArray(prompt.arguments)
             ? {
                 arguments: prompt.arguments.filter(argument => argument?.name).map(argument => ({
                     name: argument.name,
-                    ...(argument.description !== undefined ? { description: argument.description } : {}),
-                    ...(argument.required !== undefined ? { required: argument.required } : {}),
+                    ...(argument.description === undefined ? {} : { description: argument.description }),
+                    ...(argument.required === undefined ? {} : { required: argument.required }),
                 })),
             }
             : {}),
@@ -284,31 +285,19 @@ export function reconstructPromptMetadata(serverName, prompts, prefix, definitio
         const args = Array.isArray(prompt.arguments)
             ? prompt.arguments.filter(argument => argument?.name).map(argument => ({
                 name: argument.name,
-                ...(argument.description !== undefined ? { description: argument.description } : {}),
-                ...(argument.required !== undefined ? { required: argument.required } : {}),
+                ...(argument.description === undefined ? {} : { description: argument.description }),
+                ...(argument.required === undefined ? {} : { required: argument.required }),
             }))
             : [];
         return {
             serverName,
             originalName: prompt.name,
             commandName: formatPromptCommandName(prompt.name, serverName, effectivePrefix),
-            ...(prompt.title !== undefined ? { title: prompt.title } : {}),
+            ...(prompt.title === undefined ? {} : { title: prompt.title }),
             description: prompt.description ?? "",
             arguments: args,
         };
     });
-}
-function stableStringify(value) {
-    if (value === null || value === undefined || typeof value !== "object") {
-        const serialized = JSON.stringify(value);
-        return serialized === undefined ? "undefined" : serialized;
-    }
-    if (Array.isArray(value)) {
-        return `[${value.map(v => stableStringify(v)).join(",")}]`;
-    }
-    const obj = value;
-    const keys = Object.keys(obj).sort();
-    return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 function tryGetToolUiResourceUri(tool) {
     try {

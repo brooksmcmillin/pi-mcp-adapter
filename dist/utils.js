@@ -1,6 +1,47 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { extname, isAbsolute, join } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import stripJsonComments from "strip-json-comments";
+export function parseJsonWithComments(raw) {
+    return JSON.parse(stripJsonComments(raw, { trailingCommas: true }));
+}
+/** Resolve a candidate only when its real path stays within the real root. */
+export function resolveRealContainedPath(root, candidate, allowMissing = false) {
+    const contained = resolveContainedPath(root, candidate);
+    if (!contained)
+        return null;
+    const canonical = (path) => {
+        let existing = path;
+        while (allowMissing && !existsSync(existing)) {
+            const parent = dirname(existing);
+            if (parent === existing)
+                throw new Error("No existing path ancestor");
+            existing = parent;
+        }
+        return resolve(realpathSync(existing), relative(existing, path));
+    };
+    try {
+        return resolveContainedPath(canonical(root), canonical(contained));
+    }
+    catch {
+        return null;
+    }
+}
+export function resolveContainedPath(root, candidate) {
+    const resolved = resolve(root, candidate);
+    const rel = relative(root, resolved);
+    return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep) && !isAbsolute(rel)) ? resolved : null;
+}
+export function stableStringify(value) {
+    if (value === null || typeof value !== "object")
+        return JSON.stringify(value) ?? "undefined";
+    if (Array.isArray(value)) {
+        return `[${value.map(item => stableStringify(item)).join(",")}]`;
+    }
+    const object = value;
+    return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${stableStringify(object[key])}`).join(",")}}`;
+}
 async function execOpen(pi, target, browser, signal) {
     const os = platform();
     if (os === "darwin") {
@@ -81,7 +122,7 @@ export function interpolateEnvVars(value, environment = process.env) {
         .replace(/\$env:(\w+)/g, (_, name) => environment[name] ?? "")
         .replace(/\{env:(\w+)\}/g, (_, name) => environment[name] ?? "");
 }
-function getMissingEnvVars(value, environment) {
+export function getMissingEnvVars(value, environment = process.env) {
     const missing = new Set();
     for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
         const name = match[1] ?? match[2] ?? match[3];

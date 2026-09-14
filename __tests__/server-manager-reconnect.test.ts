@@ -98,6 +98,52 @@ describe("McpServerManager.reconnect", () => {
     expect(manager.getConnection("remote")).toBe(fresh);
   });
 
+  it("retires each remote connection once without letting stale or failing publications escape", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    const manager = new McpServerManager();
+    const changes: Array<[string, string]> = [];
+    manager.setMetadataListChangedListener((name, reason) => changes.push([name, reason]));
+
+    const stale = await manager.connect("remote", def);
+    const staleOnClose = stale.client.onclose!;
+    await manager.close("remote");
+    const fresh = await manager.connect("remote", def);
+
+    staleOnClose();
+    expect(fresh.status).toBe("connected");
+    expect(changes).toEqual([]);
+
+    fresh.client.onclose!();
+    fresh.client.onclose!();
+    expect(fresh.status).toBe("closed");
+    expect(changes).toEqual([["remote", "remote-close"]]);
+
+  });
+
+  it("rejects a candidate that closes during discovery before map installation", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    const manager = new McpServerManager();
+    const changes: Array<[string, string]> = [];
+    manager.setMetadataListChangedListener((name, reason) => changes.push([name, reason]));
+    let finishDiscovery!: () => void;
+    const discovery = new Promise<void>((resolve) => { finishDiscovery = resolve; });
+
+    const connecting = manager.connect("candidate", def);
+    const client = mocks.clients.at(-1)!;
+    client.listTools.mockImplementation(async () => {
+      await discovery;
+      return { tools: [{ name: "stale" }] };
+    });
+    await vi.waitFor(() => expect(client.listTools).toHaveBeenCalled());
+
+    client.onclose!();
+    finishDiscovery();
+
+    await expect(connecting).rejects.toThrow("closed during metadata discovery");
+    expect(manager.getConnection("candidate")).toBeUndefined();
+    expect(changes).toEqual([]);
+  });
+
   it("keeps a shared reconnect alive when one caller aborts waiting", async () => {
     const { McpServerManager } = await import("../server-manager.ts");
     const manager = new McpServerManager();

@@ -11,11 +11,12 @@ import { ContentBlockSchema } from "@modelcontextprotocol/core";
 import type { ConsentManager } from "./consent-manager.ts";
 import { ServerError, wrapError } from "./errors.ts";
 import { formatAuthRequiredMessage, normalizeToolArguments } from "./utils.ts";
-import { buildHostHtmlTemplate, buildCspMetaContent } from "./host-html-template.ts";
+import { buildHostHtmlTemplate, buildSandboxResourceCsp } from "./host-html-template.ts";
 import {
   buildSandboxProxyCsp,
   buildSandboxProxyHtml,
   SANDBOX_PROXY_PATH,
+  SANDBOX_RESOURCE_PATH_PREFIX,
 } from "./sandbox-proxy-template.ts";
 import { logger } from "./logger.ts";
 import type { McpServerManager } from "./server-manager.ts";
@@ -85,7 +86,8 @@ export interface UiServerOptions {
 
 export async function startUiServer(options: UiServerOptions): Promise<UiServerHandle> {
   const sessionToken = options.sessionToken ?? randomUUID();
-  const uiResourceToken = randomUUID();
+  const sandboxResourcePath = `${SANDBOX_RESOURCE_PATH_PREFIX}${randomUUID()}`;
+  const resourceAllow = buildAllowAttribute(options.resource.meta.permissions);
   const log = logger.child({ 
     component: "UiServer",
     server: options.serverName,
@@ -316,8 +318,12 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
     try {
       const method = req.method || "GET";
       const hostHeader = req.headers.host;
-      const url = new URL(req.url || "/", `http://${hostHeader || "127.0.0.1"}`);
-      if (hostHeader !== undefined && !isAllowedHost(url.hostname)) {
+      if (!hostHeader) {
+        sendText(res, 400, "Missing host");
+        return;
+      }
+      const url = new URL(req.url || "/", `http://${hostHeader}`);
+      if (!isAllowedHost(url.hostname)) {
         sendText(res, 403, "Invalid host");
         return;
       }
@@ -346,12 +352,11 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
 
         const html = buildHostHtmlTemplate({
           sessionToken,
-          uiResourceToken,
           serverName: options.serverName,
           toolName: options.toolName,
           toolArgs: options.toolArgs,
           resource: options.resource,
-          allowAttribute: buildAllowAttribute(options.resource.meta.permissions),
+          allowAttribute: resourceAllow,
           requireToolConsent: options.consentManager.requiresPrompt(options.serverName),
           cacheToolConsent: options.consentManager.shouldCacheConsent(),
           hostContext,
@@ -388,20 +393,6 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       if (method === "GET" && url.pathname === "/health") {
         if (!validateTokenQuery(url, sessionToken, res)) return;
         sendJson(res, 200, { ok: true, result: { healthy: true } });
-        return;
-      }
-
-      if (method === "GET" && url.pathname === "/ui-app") {
-        if (!validateTokenQuery(url, uiResourceToken, res, "resource")) return;
-        touchHeartbeat();
-        // Enforce host metadata independently of where app HTML places its document head.
-        const cspContent = buildCspMetaContent(options.resource.meta.csp);
-        res.writeHead(200, {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store",
-          "Content-Security-Policy": cspContent,
-        });
-        res.end(options.resource.html);
         return;
       }
 
@@ -718,23 +709,17 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         try {
           const method = req.method || "GET";
           const hostHeader = req.headers.host;
-          const url = new URL(req.url || "/", `http://${hostHeader || "127.0.0.1"}`);
-          if (hostHeader !== undefined && !isAllowedHost(url.hostname)) {
+          if (!hostHeader) {
+            sendText(res, 400, "Missing host");
+            return;
+          }
+          const url = new URL(req.url || "/", `http://${hostHeader}`);
+          if (!isAllowedHost(url.hostname)) {
             sendText(res, 403, "Invalid host");
             return;
           }
 
-          if (method === "HEAD" && url.pathname === SANDBOX_PROXY_PATH) {
-            res.writeHead(200, {
-              "Content-Type": "text/html; charset=utf-8",
-              "Cache-Control": "no-store",
-              "Content-Security-Policy": buildSandboxProxyCsp(),
-            });
-            res.end();
-            return;
-          }
-
-          if (method === "GET" && url.pathname === SANDBOX_PROXY_PATH) {
+          if ((method === "GET" || method === "HEAD") && url.pathname === SANDBOX_PROXY_PATH) {
             res.writeHead(200, {
               "Content-Type": "text/html; charset=utf-8",
               "Cache-Control": "no-store",
@@ -742,7 +727,23 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
               "Referrer-Policy": "no-referrer",
               "X-Content-Type-Options": "nosniff",
             });
-            res.end(buildSandboxProxyHtml({ parentOrigin }));
+            res.end(method === "HEAD" ? undefined : buildSandboxProxyHtml({
+              parentOrigin,
+              resourcePath: sandboxResourcePath,
+              allowAttribute: resourceAllow,
+            }));
+            return;
+          }
+
+          if ((method === "GET" || method === "HEAD") && url.pathname === sandboxResourcePath) {
+            res.writeHead(200, {
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "no-store",
+              "Content-Security-Policy": buildSandboxResourceCsp(options.resource.meta.csp),
+              "Referrer-Policy": "no-referrer",
+              "X-Content-Type-Options": "nosniff",
+            });
+            res.end(method === "HEAD" ? undefined : options.resource.html);
             return;
           }
 
