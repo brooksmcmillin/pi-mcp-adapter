@@ -1,6 +1,6 @@
 import { Check, Errors } from "typebox/value";
 import type { DirectToolSpec, McpConfig, ToolPrefix } from "./types.ts";
-import { createToolSelectorCandidateIndex, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix } from "./types.ts";
+import { createToolSelectorCandidateIndex, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix, resolveUniqueNameOwnership } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
 import { isServerCacheValid, parseDirectToolSelectors } from "./metadata-cache.ts";
 export { getMissingConfiguredDirectToolServers } from "./metadata-cache.ts";
@@ -9,6 +9,13 @@ import { resourceNameToToolName } from "./resource-tools.ts";
 
 const BUILTIN_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "mcp"]);
 export const DIRECT_TOOLS_ADVISORY_THRESHOLD = 75;
+
+export function getLargeDirectToolsAdvisory(config: McpConfig, specs: readonly DirectToolSpec[]): string | undefined {
+  if (config.settings?.warnOnLargeDirectTools === false) return undefined;
+  const eagerCount = specs.filter((spec) => !spec.lazy).length;
+  if (eagerCount < DIRECT_TOOLS_ADVISORY_THRESHOLD) return undefined;
+  return `MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`;
+}
 
 /**
  * Recover one model-emitted JSON layer for schema-declared object and array
@@ -28,14 +35,14 @@ export function prepareDirectToolArguments(inputSchema: unknown, args: unknown):
     for (const [name, propertySchema] of Object.entries(properties)) {
       if (!Object.hasOwn(input, name) || typeof input[name] !== "string"
         || !propertySchema || typeof propertySchema !== "object" || Array.isArray(propertySchema)) continue;
-      const expectedType = (propertySchema as Record<string, unknown>).type;
-      if (expectedType !== "object" && expectedType !== "array") continue;
+      // A valid string may be intentional (for example, string | object).
+      // Only recover JSON when the advertised property rejects the raw value.
+      if (Check(propertySchema as never, input[name])) continue;
       try {
         const parsed: unknown = JSON.parse(input[name] as string);
-        const matches = expectedType === "array"
-          ? Array.isArray(parsed)
-          : parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
-        if (matches) {
+        const isContainer = Array.isArray(parsed)
+          || (parsed !== null && typeof parsed === "object");
+        if (isContainer && Check(propertySchema as never, parsed)) {
           prepared ??= { ...input };
           prepared[name] = parsed;
         }
@@ -72,8 +79,6 @@ export function resolveDirectTools(
 ): DirectToolSpec[] {
   const specs: DirectToolSpec[] = [];
   if (!cache) return specs;
-
-  const seenNames = new Set<string>();
 
   const envSelection = envOverride ? parseDirectToolSelectors(envOverride) : null;
   const globalDirect = config.settings?.directTools;
@@ -139,11 +144,6 @@ export function resolveDirectTools(
         console.warn(`MCP: skipping direct tool "${prefixedName}" (collides with builtin)`);
         continue;
       }
-      if (seenNames.has(prefixedName)) {
-        console.warn(`MCP: skipping duplicate direct tool "${prefixedName}" from "${serverName}"`);
-        continue;
-      }
-      seenNames.add(prefixedName);
       specs.push({
         ...(lazy ? { lazy: true } : {}),
         serverName,
@@ -166,11 +166,6 @@ export function resolveDirectTools(
           console.warn(`MCP: skipping direct resource tool "${prefixedName}" (collides with builtin)`);
           continue;
         }
-        if (seenNames.has(prefixedName)) {
-          console.warn(`MCP: skipping duplicate direct resource tool "${prefixedName}" from "${serverName}"`);
-          continue;
-        }
-        seenNames.add(prefixedName);
         specs.push({
           ...(lazy ? { lazy: true } : {}),
           serverName,
@@ -183,17 +178,16 @@ export function resolveDirectTools(
     }
   }
 
-  for (const spec of specs) reservedNames?.add(spec.prefixedName);
+  const ownership = resolveUniqueNameOwnership(specs, (spec) => spec.prefixedName);
+  for (const [name, colliding] of ownership.collisions) {
+    console.warn(`MCP: skipping colliding direct name "${name}" from ${colliding.map((spec) => `"${spec.serverName}"`).join(", ")}`);
+  }
+  const uniqueSpecs = ownership.unique;
+  for (const spec of uniqueSpecs) reservedNames?.add(spec.prefixedName);
 
   const emittedSpecs = unavailableServers.size === 0
-    ? specs
-    : specs.filter((spec) => !unavailableServers.has(spec.serverName));
-
-  // Lazy specs cost nothing at turn start, so they do not count toward the advisory.
-  const eagerCount = emittedSpecs.filter((spec) => !spec.lazy).length;
-  if (config.settings?.warnOnLargeDirectTools !== false && eagerCount >= DIRECT_TOOLS_ADVISORY_THRESHOLD) {
-    console.warn(`MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`);
-  }
+    ? uniqueSpecs
+    : uniqueSpecs.filter((spec) => !unavailableServers.has(spec.serverName));
 
   return emittedSpecs;
 }

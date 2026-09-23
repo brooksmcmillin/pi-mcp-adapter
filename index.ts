@@ -1,17 +1,19 @@
 import { withFileMutationQueue, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { McpExtensionState } from "./state.ts";
 import { isServerDisabled, type DirectToolSpec, type McpAdapterOptions, type McpConfig, type PromptMetadata, type ServerEntry } from "./types.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import { cloneMcpConfig, discoverConfiguredClaudePluginSkills, getPiGlobalConfigPath, getProjectConfigPath, loadMcpConfig, resolveConfiguredClaudePluginMcp, writeProjectServerDisabledOverride, writeSharedServerEntry } from "./config.ts";
-import { buildProxyDescription, getMissingConfiguredDirectToolServers, prepareDirectToolArguments, resolveDirectTools } from "./direct-tool-surface.ts";
+import { buildProxyDescription, getLargeDirectToolsAdvisory, getMissingConfiguredDirectToolServers, prepareDirectToolArguments, resolveDirectTools } from "./direct-tool-surface.ts";
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { computeServerHash, isServerCacheValid, loadMetadataCache, parseDirectToolSelectors, type MetadataCache } from "./metadata-cache.ts";
 import { createPromptCommand, resolveCachedPrompts } from "./prompts.ts";
 import { logger } from "./logger.ts";
-import { formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
+import { formatMcpFooterStatus, formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
 import { createMcpDirectToolCallRenderer, createMcpProxyToolCallRenderer, createMcpScriptToolCallRenderer, createMcpToolResultRenderer, resolveMcpToolRenderOptions } from "./tool-result-renderer.ts";
 import { toolErrorOverride } from "./error-signal.ts";
 import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwner } from "./runtime-owner.ts";
@@ -53,6 +55,18 @@ const loadInstallParsing = createRetryableLoader(() => import("./mcp-install.ts"
 const INIT_WAIT_TIMEOUT_MS = 30_000;
 const INIT_FAILURE_MESSAGE_MAX_CHARS = 1_000;
 const INIT_WAIT_TIMED_OUT: unique symbol = Symbol("init-wait-timed-out");
+
+function hasEnabledServerWithoutValidMetadata(
+  config: McpConfig,
+  cache: MetadataCache | null,
+  directSpecs: readonly DirectToolSpec[] = [],
+): boolean {
+  return Object.entries(config.mcpServers).some(([serverName, definition]) => {
+    if (isServerDisabled(definition) || directSpecs.some((spec) => spec.serverName === serverName)) return false;
+    const entry = cache?.servers[serverName];
+    return entry === undefined || !isServerCacheValid(entry, definition);
+  });
+}
 
 export interface McpServerRegistration {
   dispose(): Promise<void>;
@@ -318,17 +332,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   const envRaw = process.env.MCP_DIRECT_TOOLS;
   const envDirectToolOverride = parseEnvDirectToolOverride(envRaw);
   const namespaceEnvOverride = resolveNamespaceEnvOverride(envRaw, envDirectToolOverride);
-  const enabledEarlyServers = Object.entries(earlyConfig.mcpServers)
-    .filter(([, definition]) => !isServerDisabled(definition));
-  const hasStartupServer = enabledEarlyServers.some(([, definition]) =>
-    definition.lifecycle === "eager" || definition.lifecycle === "keep-alive");
-  const hasUsableCachedMetadata = earlyCache !== null && enabledEarlyServers.every(([serverName, definition]) => {
-    const entry = earlyCache.servers[serverName];
-    return entry !== undefined && isServerCacheValid(entry, definition);
-  });
-  const hasColdEnvironmentDirectTools = envRaw !== undefined && envRaw !== "__none__"
-    && getMissingConfiguredDirectToolServers(earlyConfig, earlyCache, envDirectToolOverride).length > 0;
-  const deferSessionRuntime = !hasStartupServer && hasUsableCachedMetadata && !hasColdEnvironmentDirectTools;
+  const hasStartupServer = Object.values(earlyConfig.mcpServers).some((definition) =>
+    !isServerDisabled(definition) && (definition.lifecycle === "eager" || definition.lifecycle === "keep-alive"));
   const registeredDirectTools = new Map<string, string>();
   const registeredDirectToolServers = new Map<string, string>();
   const registeredDirectToolVersions = new Map<string, number>();
@@ -339,8 +344,6 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   const fallbackDeactivatedTools = new Set<string>();
   // directTools: "search" — registered inactive, activated by mcp({ search }).
   const lazyDirectTools = new Set<string>();
-  // The lazy tools a search has activated; every other lazy tool is held out
-  // of the active set. Per process: nothing here survives a restart.
   const searchActivatedTools = new Set<string>();
   const toolRenderOptions = resolveMcpToolRenderOptions(earlyConfig.settings);
   const toolRenderShell = toolRenderOptions.resultRendering === "compact" ? "self" : "default";
@@ -348,6 +351,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   let proxyToolRegistered = false;
   let proxyToolDescription: string | null = null;
   let directToolsFrozen = false;
+  let largeDirectToolsAdvisoryDelivered = false;
   // Session/runtime scoped server registrations from other extensions. They
   // survive session restarts within this install and die with the process.
   const runtimeServers = new Map<string, { definition: ServerEntry; entry: ServerEntry }>();
@@ -605,6 +609,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   }
 
   function syncToolSurface(ctx?: ExtensionContext): void {
+    const notificationGeneration = lifecycleGeneration;
+    const notificationOwner = currentOwner;
     const config = state?.config ?? earlyConfig;
     const cache = loadToolSurfaceCache(config);
     const result = syncDirectTools(config, cache);
@@ -618,6 +624,13 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     }
     syncProxyTool(config, cache, result.specs);
     syncNamespaceTools(config, cache, result.reservedDirectNames, result.activeDirectNames);
+    deliverLargeDirectToolsAdvisory(ctx, config, result.specs);
+    if (ctx && (notificationGeneration !== lifecycleGeneration
+      || notificationOwner !== currentOwner
+      || (notificationOwner && !notificationOwner.isActive()))) {
+      throw notificationOwner?.signal.reason ?? new Error("Stale MCP session after direct-tools advisory");
+    }
+    finalizationGuard?.();
     const changed = result.added.length + result.updated.length + result.deactivated.length;
     if (changed > 0 && ctx?.hasUI) {
       callReentrant(() => ctx.ui.notify(
@@ -625,6 +638,40 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         "info",
       ));
     }
+  }
+
+  function deliverLargeDirectToolsAdvisory(
+    ctx: ExtensionContext | undefined,
+    config: McpConfig,
+    specs: readonly DirectToolSpec[],
+  ): void {
+    if (!ctx || largeDirectToolsAdvisoryDelivered) return;
+    const message = getLargeDirectToolsAdvisory(config, specs);
+    if (!message) return;
+    largeDirectToolsAdvisoryDelivered = true;
+    if (ctx.hasUI) {
+      callReentrant(() => ctx.ui.notify(message, "warning"));
+    } else {
+      console.warn(message);
+    }
+  }
+
+  function getDeferredSessionSnapshot(cwd: string | undefined): {
+    config: McpConfig;
+    cache: MetadataCache | null;
+    enabledServerCount: number;
+  } | undefined {
+    const config = programmaticConfig
+      ? resolveConfiguredClaudePluginMcp(cloneMcpConfig(sessionConfig), cwd ?? process.cwd())
+      : loadMcpConfig(earlyConfigPath, cwd);
+    const cache = loadMetadataCache();
+    const enabledServers = Object.values(config.mcpServers).filter((definition) => !isServerDisabled(definition));
+    if (enabledServers.some((definition) => definition.lifecycle === "eager" || definition.lifecycle === "keep-alive")) return undefined;
+    if (envRaw !== undefined && envRaw !== "__none__"
+      && getMissingConfiguredDirectToolServers(config, cache, envDirectToolOverride).length > 0) return undefined;
+    if (config.settings?.deferWithMissingMetadata !== true
+      && (cache === null || hasEnabledServerWithoutValidMetadata(config, cache))) return undefined;
+    return { config, cache, enabledServerCount: enabledServers.length };
   }
 
   function syncNamespaceTools(
@@ -686,8 +733,6 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       .filter(([name]) => !state?.provisionalInstalls?.has(name))
       .flatMap(([, prompts]) => prompts));
   }
-
-  registerPromptCommands(resolveCachedPrompts(earlyConfig));
 
   const registerRuntimeServer = (name: string, definition: ServerEntry): McpServerRegistration => {
     if (typeof name !== "string" || name.trim() === "") {
@@ -1016,11 +1061,21 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       ? cloneMcpConfig(sessionConfig)
       : loadMcpConfig(earlyConfigPath, event.cwd);
     const skillPaths = discoverConfiguredClaudePluginSkills(resourceConfig, event.cwd);
+    if (earlyConfig.settings?.scriptMode !== false) {
+      const scriptingSkillPath = fileURLToPath(new URL("./skills/mcp-scripting/SKILL.md", import.meta.url));
+      if (existsSync(scriptingSkillPath) && !skillPaths.includes(scriptingSkillPath)) {
+        skillPaths.push(scriptingSkillPath);
+      }
+    }
     return skillPaths.length > 0 ? { skillPaths } : undefined;
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    // Reset before any await so replacement sessions cannot inherit activation.
+    searchActivatedTools.clear();
+    holdLazyToolsInactive();
     const generation = ++lifecycleGeneration;
+    largeDirectToolsAdvisoryDelivered = false;
     const previousState = state;
     const previousOwner = currentOwner;
     const previousOAuthRuntime = currentOAuthRuntime;
@@ -1049,7 +1104,33 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     if (state) return;
 
     if (!initPromise) {
-      if (deferSessionRuntime) return;
+      const deferredSnapshot = getDeferredSessionSnapshot(ctx.cwd);
+      if (deferredSnapshot) {
+        const { config, cache, enabledServerCount } = deferredSnapshot;
+        const directResult = syncDirectTools(config, cache);
+        syncProxyTool(config, cache, directResult.specs);
+        syncNamespaceTools(config, cache, directResult.reservedDirectNames, directResult.activeDirectNames);
+        // Pi cannot unregister commands. Wait until cwd is authoritative, and
+        // under the opt-in wait for live metadata, before exposing prompts.
+        if (config.settings?.deferWithMissingMetadata !== true) {
+          registerPromptCommands(resolveCachedPrompts(config));
+        }
+        deliverLargeDirectToolsAdvisory(ctx, config, directResult.specs);
+        if (generation !== lifecycleGeneration || !owner.isActive() || currentOwner !== owner) return;
+        const serverCount = Object.keys(config.mcpServers).length;
+        const formattedStatus = formatMcpFooterStatus(
+          config,
+          enabledServerCount,
+          serverCount - enabledServerCount,
+          0,
+        );
+        const theme = ctx.ui?.theme;
+        const styledStatus = formattedStatus !== undefined && typeof theme?.fg === "function"
+          ? theme.fg("accent", formattedStatus)
+          : formattedStatus;
+        ctx.ui?.setStatus("mcp", styledStatus);
+        return;
+      }
       startInitialization(ctx, owner, generation, "stale_session_start");
     }
 
@@ -1068,6 +1149,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     }
     await initializationStarted;
   });
+
+  // Other extensions can reactivate registered tools after session_start.
+  pi.on("before_agent_start", holdLazyToolsInactive);
 
   pi.on("session_tree", (_event, ctx) => {
     const currentState = state;
@@ -1148,6 +1232,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           { value: "tools", label: "tools — List all tools" },
           { value: "prompts", label: "prompts — List all MCP prompts" },
           { value: "setup", label: "setup — Configure MCP servers" },
+          { value: "jev", label: "jev setup — Configure Jev semantic search" },
+          { value: "edit", label: "edit — Edit .mcp.json or the global config" },
           { value: "logout", label: "logout — Clear server credentials" },
           { value: "token", label: "token — Manage stored bearer tokens" },
           { value: "disable", label: "disable — Disable a server" },
@@ -1158,6 +1244,11 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       }
 
       const [, subcommand, argumentPrefix] = argumentMatch;
+      if (subcommand === "jev") {
+        return "setup".startsWith((argumentPrefix ?? "").trimStart())
+          ? [{ value: "jev setup", label: "setup — Configure Jev semantic search" }]
+          : null;
+      }
       if (
         (subcommand !== "reconnect" && subcommand !== "logout" && subcommand !== "disable" && subcommand !== "enable" && subcommand !== "token")
         || argumentPrefix === undefined
@@ -1240,6 +1331,41 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           }
           const result = await commands.openMcpSetup(state, pi, commandCtx, earlyConfigPath, "setup");
           if (result?.configChanged) {
+            commandOwner?.throwIfInactive();
+            await commandReload();
+            return;
+          }
+          break;
+        }
+        case "jev": {
+          if (parts[1] !== "setup" || parts.length !== 2) {
+            commandCtx.ui?.notify("Usage: /mcp jev setup", "error");
+            break;
+          }
+          if (programmaticConfig) {
+            commandCtx.ui?.notify("Jev setup is unavailable when config is supplied by createMcpAdapter().", "info");
+            break;
+          }
+          commandOwner?.throwIfInactive();
+          if (await commands.setupJevSemanticSearch(state, commandCtx, earlyConfigPath)) {
+            commandOwner?.throwIfInactive();
+            await commandReload();
+            return;
+          }
+          break;
+        }
+        case "edit": {
+          if (programmaticConfig) {
+            commandCtx.ui?.notify("MCP edit is unavailable when config is supplied by createMcpAdapter().", "info");
+            break;
+          }
+          const target = parts[1] ?? "project";
+          if (target !== "project" && target !== "global") {
+            commandCtx.ui?.notify("Usage: /mcp edit [project|global]", "error");
+            return;
+          }
+          commandOwner?.throwIfInactive();
+          if (await commands.editSharedConfig(commandCtx, target)) {
             commandOwner?.throwIfInactive();
             await commandReload();
             return;
@@ -1475,6 +1601,12 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         details: { mode: "install", error: "programmatic_config" },
       };
     }
+    if (targetState.config.settings?.allowInstall === false) {
+      return {
+        content: [{ type: "text" as const, text: "MCP install is disabled by configuration." }],
+        details: { mode: "install", error: "install_disabled" },
+      };
+    }
     if (target !== undefined && target !== "global" && target !== "project") {
       return {
         content: [{ type: "text" as const, text: "MCP install target must be 'global' or 'project'." }],
@@ -1673,11 +1805,12 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         describe: Type.Optional(Type.String({ description: "Tool name to describe (shows parameters)" })),
         instructions: Type.Optional(Type.String({ description: "Server name to show that server's usage instructions" })),
         search: Type.Optional(Type.String({ description: "Search tools by name/description" })),
+        searchMode: Type.Optional(Type.String({ enum: ["lexical", "semantic"], description: "Search backend (default: lexical; semantic is available when a System One key is configured)" })),
         regex: Type.Optional(Type.Boolean({ description: "Treat search as regex (default: substring match)" })),
         includeSchemas: Type.Optional(Type.Boolean({ description: "Include parameter schemas in search results (default: true)" })),
         limit: optionalNumber({ minimum: 1, description: "Maximum search results to return (default: 12)" }),
         offset: optionalNumber({ minimum: 0, description: "Search result offset (default: 0)" }),
-        server: Type.Optional(Type.String({ description: "Server name (filters/disambiguates calls and optionally names an install)" })),
+        server: Type.Optional(Type.String({ description: "Server name: filters searches, disambiguates calls and describe operations, and optionally names an install" })),
         action: Type.Optional(Type.String({ description: "Action: 'install', 'ui-messages', 'auth-start', or 'auth-complete'" })),
         url: Type.Optional(Type.String({ description: "MCP endpoint URL for action: 'install'" })),
         target: Type.Optional(Type.String({ description: "Install target: 'global' (default) or 'project'" })),
@@ -1690,6 +1823,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         describe?: string;
         instructions?: string;
         search?: string;
+        searchMode?: "lexical" | "semantic";
         regex?: boolean;
         includeSchemas?: boolean;
         limit?: number;
@@ -1818,13 +1952,14 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           return connectAndReport(proxyState, params.connect, signal, _ctx as ExtensionContext);
         }
         if (params.describe) {
-          return proxyModes.executeDescribe(proxyState, params.describe);
+          return proxyModes.executeDescribe(proxyState, params.describe, params.server);
         }
         if (params.instructions) {
           return proxyModes.executeInstructions(proxyState, params.instructions);
         }
         if (params.search !== undefined) {
-          const result = proxyModes.executeSearch(proxyState, params.search, params.regex, params.server, params.includeSchemas, params.limit, params.offset);
+          const result = await proxyModes.executeSearch(proxyState, params.search, params.regex, params.server, params.includeSchemas, params.limit, params.offset, params.searchMode, signal);
+          assertRuntimeGuard(proxyGuard);
           if (lazyDirectTools.size === 0) return result;
           holdLazyToolsInactive();
           const matches = (result.details as { matches?: Array<{ server: string; tool: string }> } | undefined)?.matches ?? [];
@@ -1862,7 +1997,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       config.settings?.disableProxyTool !== true
       || directSpecs.length === 0
       || hasSearchModeSpecs
-      || missingConfiguredDirectToolServers.length > 0;
+      || missingConfiguredDirectToolServers.length > 0
+      || hasEnabledServerWithoutValidMetadata(config, cache, directSpecs);
 
     if (shouldRegisterProxyTool) {
       const description = buildProxyDescription(config);

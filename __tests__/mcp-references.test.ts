@@ -76,11 +76,11 @@ describe("namespaceProxyName", () => {
 });
 
 describe("resolveMcpToolReferences", () => {
-  it("expands direct server references from explicit config and cache", () => {
+  it.each([undefined, false])("expands direct server references when namespaceProxyTools is %s", (namespaceProxyTools) => {
     const definition: ServerEntry = { command: "demo", directTools: true };
     const result = resolveMcpToolReferences(
       ["mcp:demo"],
-      configFor({ demo: definition }),
+      configFor({ demo: definition }, { namespaceProxyTools }),
       cacheFor([["demo", { definition, tools: [{ name: "search" }, { name: "fetch" }] }]]),
     );
 
@@ -105,6 +105,18 @@ describe("resolveMcpToolReferences", () => {
     );
 
     expect(result).toEqual({ names: ["mcp__demo"], diagnostics: [] });
+  });
+
+  it.each(["mcp:demo", "mcp:demo/demo_search", "mcp:demo_search"])("does not resolve %s to a disabled namespace proxy", (ref) => {
+    const definition: ServerEntry = { command: "demo" };
+    const result = resolveMcpToolReferences(
+      [ref],
+      configFor({ demo: definition }, { namespaceProxyTools: false }),
+      cacheFor([["demo", { definition, tools: [{ name: "search" }] }]]),
+    );
+
+    expect(result.names).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
   });
 
   it("rejects unformatted proxy-only resource references", () => {
@@ -223,7 +235,7 @@ describe("resolveMcpToolReferences", () => {
       ["second", { definition: second, tools: [{ name: "get" }] }],
     ]);
 
-    expect(resolveMcpToolReferences(["mcp:first/get"], config, cache).names).toEqual(["get"]);
+    expect(resolveMcpToolReferences(["mcp:first/get"], config, cache).names).toEqual([]);
     const result = resolveMcpToolReferences(["mcp:second/get"], config, cache);
     expect(result.names).toEqual([]);
     expect(result.diagnostics[0]).toContain("no registered tool");
@@ -276,7 +288,7 @@ describe("resolveMcpToolReferences", () => {
     const config = configFor({ demo: definition });
     const cache = cacheFor([["demo", { definition, tools: [{ name: "namespace.tool" }, { name: "namespace_tool" }] }]]);
 
-    expect(resolveMcpToolReferences(["mcp:demo/namespace.tool"], config, cache).names).toEqual(["demo_namespace_tool"]);
+    expect(resolveMcpToolReferences(["mcp:demo/namespace.tool"], config, cache).names).toEqual([]);
     const result = resolveMcpToolReferences(["mcp:demo/namespace_tool"], config, cache);
     expect(result.names).toEqual([]);
     expect(result.diagnostics[0]).toContain("no registered tool");

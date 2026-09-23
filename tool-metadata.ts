@@ -1,7 +1,7 @@
 import { getToolUiResourceUri } from "./ui-app-bridge-helpers.ts";
 import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata, McpTool, McpResource, ServerEntry, ToolPrefix } from "./types.ts";
-import { createToolSelectorCandidateIndex, formatToolName, getToolNameCandidates, isToolAllowed, resolveToolPrefix } from "./types.ts";
+import { createToolSelectorCandidateIndex, formatToolName, getToolNameCandidates, isToolAllowed, resolveToolPrefix, resolveUniqueNameOwnership } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { extractToolUiStreamMode } from "./utils.ts";
 import { extractUiToolVisibility, isUiToolVisibleToModel } from "./ui-tool-visibility.ts";
@@ -18,7 +18,6 @@ export function buildToolMetadata(
 ): { metadata: ToolMetadata[]; failedTools: string[] } {
   const metadata: ToolMetadata[] = [];
   const failedTools: string[] = [];
-  const seenNames = new Set<string>();
   const effectivePrefix = resolveToolPrefix(definition, prefix);
   const hasToolFilters =
     (Array.isArray(definition.includeTools) && definition.includeTools.length > 0) ||
@@ -86,16 +85,10 @@ export function buildToolMetadata(
     }
 
     const name = formatToolName(tool.name, serverName, effectivePrefix);
-    if (seenNames.has(name)) {
-      continue;
-    }
-
     const uiVisibility = extractUiToolVisibility(tool._meta);
     if (!isUiToolVisibleToModel(uiVisibility)) {
       continue;
     }
-    seenNames.add(name);
-
     let uiResourceUri: string | undefined;
     try {
       uiResourceUri = getToolUiResourceUri({ _meta: tool._meta });
@@ -123,11 +116,6 @@ export function buildToolMetadata(
       }
 
       const name = formatToolName(baseName, serverName, effectivePrefix);
-      if (seenNames.has(name)) {
-        continue;
-      }
-      seenNames.add(name);
-
       metadata.push({
         name,
         originalName: baseName,
@@ -137,7 +125,11 @@ export function buildToolMetadata(
     }
   }
 
-  return { metadata, failedTools };
+  const ownership = resolveUniqueNameOwnership(metadata, (tool) => tool.name);
+  for (const colliding of ownership.collisions.values()) {
+    failedTools.push(...colliding.map((tool) => tool.originalName));
+  }
+  return { metadata: ownership.unique, failedTools };
 }
 
 export function getToolNames(state: McpExtensionState, serverName: string): string[] {

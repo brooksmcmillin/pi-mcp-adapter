@@ -5,7 +5,7 @@ import type { DirectToolSpec, McpContent } from "./types.ts";
 import { lazyConnect, getFailureAgeSeconds, clearFailure } from "./init.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { formatSchema } from "./tool-metadata.ts";
-import { resolveMcpResultContent, transformMcpContent, transformMcpResourceContents } from "./tool-registrar.ts";
+import { resolveMcpResultContent, transformMcpResourceContents } from "./tool-registrar.ts";
 import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
 import { maybeStartUiSession, summarizeUiSessionResult, type UiSessionRuntime } from "./ui-session.ts";
 import { isServerDisabled } from "./types.ts";
@@ -13,6 +13,7 @@ import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
+import { callToolViaTaskSession } from "./mcp-tasks.ts";
 import { ensureToolCallApproved } from "./tool-approval.ts";
 import { getInputRequiredNeedsUiDetails } from "./errors.ts";
 
@@ -27,6 +28,7 @@ type DirectAutoAuthResult =
 export {
   DIRECT_TOOLS_ADVISORY_THRESHOLD,
   buildProxyDescription,
+  getLargeDirectToolsAdvisory,
   getMissingConfiguredDirectToolServers,
   prepareDirectToolArguments,
   resolveDirectTools,
@@ -311,6 +313,15 @@ export function createDirectToolExecutor(
         spec.serverName,
         async (conn) => {
           await state.manager.ensureListen?.(spec.serverName, conn);
+          if (conn.taskSession) {
+            return await callToolViaTaskSession(conn.taskSession, {
+              name: spec.originalName,
+              args: normalizedParams ?? {},
+              meta: uiSession?.requestMeta,
+              signal: ownedSignal,
+              requestTimeoutMs: requestOptions?.timeout,
+            }) as unknown as ClientCallToolResult;
+          }
           return abortable(conn.client.callTool({
             name: spec.originalName,
             arguments: normalizedParams,
@@ -321,14 +332,11 @@ export function createDirectToolExecutor(
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/client").CallToolResult);
 
       if (result.isError) {
-        const mcpContent = (result.content ?? []) as McpContent[];
-        const content = transformMcpContent(mcpContent, state.owner?.signal);
+        const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal);
         const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-        const schemaText = spec.inputSchema ? `\n\nExpected parameters:\n${formatSchema(spec.inputSchema)}` : "";
         const guarded = await guardMcpOutput(outputContent, {
           ...outputGuardOptions,
           prefix: "Error: ",
-          suffix: schemaText,
           emptyTextFallback: "Tool execution failed",
           ...(state.config.settings?.directToolResultDetails === "bounded" ? { rawMcpResult: result } : {}),
         });
