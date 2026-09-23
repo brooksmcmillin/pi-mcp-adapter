@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OverlayHandle } from "@earendil-works/pi-tui";
 import type { McpExtensionState } from "./state.ts";
@@ -14,8 +15,10 @@ import {
   previewSharedServerEntry,
   previewStarterSharedConfig,
   writeDirectToolsConfig,
+  writeJevSemanticSearchConfig,
   writeProjectServerDisabledOverride,
   writeSharedServerEntry,
+  writeSharedConfigText,
   writeStarterSharedConfig,
 } from "./config.ts";
 import { markKeepAliveAfterConnect, notifyToolMetadataUpdated, updateMetadataCache, updateStatusBar, getFailureAgeSeconds, getFailureMessage, clearFailure, recordFailure } from "./init.ts";
@@ -26,8 +29,9 @@ import { supportsOAuth, authenticate, removeAuth, type McpOAuthRuntime } from ".
 import { getAuthStorageOptions, inspectAuthForUrl, type AuthStorageOptions } from "./mcp-auth.ts";
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
-import { openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
+import { formatTerminalError, openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
 import { isAbortError } from "./runtime-owner.ts";
+import { resolveJevCredential } from "./jev-key-store.ts";
 
 function terminalHyperlink(label: string, url: string): string {
   return `\u001B]8;;${sanitizeTerminalText(url)}\u001B\\${sanitizeTerminalText(label)}\u001B]8;;\u001B\\`;
@@ -44,6 +48,93 @@ function terminalHyperlink(label: string, url: string): string {
  */
 function canRenderPanel(ctx: ExtensionContext): boolean {
   return ctx.hasUI && ctx.mode === "tui";
+}
+
+export async function editSharedConfig(ctx: ExtensionContext, target: SharedConfigTarget): Promise<boolean> {
+  if (!ctx.hasUI) return false;
+  const path = getSharedConfigPath(target, ctx.cwd);
+  const before = existsSync(path) ? readFileSync(path, "utf8") : '{\n  "mcpServers": {}\n}\n';
+  const after = await ctx.ui.editor(`Edit ${path} (Ctrl+G opens $EDITOR)`, before);
+  if (after === undefined || after === before) return false;
+  try {
+    writeSharedConfigText(path, after);
+  } catch (error) {
+    ctx.ui.notify(`MCP: not saved: ${formatTerminalError(error)}`, "error");
+    return false;
+  }
+  return true;
+}
+
+export async function setupJevSemanticSearch(
+  state: McpExtensionState,
+  ctx: ExtensionContext,
+  configOverridePath?: string,
+): Promise<boolean> {
+  if (!ctx.hasUI) return false;
+  const credential = resolveJevCredential();
+  if (credential.status !== "present") {
+    const detail = credential.status === "unavailable" ? ` ${credential.message}` : "";
+    ctx.ui.notify(
+      `Jev needs a System One API key.${detail}\nRun \`pi-mcp-adapter key set systemone\` in a terminal, then run \`/mcp jev setup\` again.`,
+      "error",
+    );
+    return false;
+  }
+
+  const servers = Object.keys(state.config.mcpServers)
+    .filter((name) => !isServerDisabled(state.config.mcpServers[name]))
+    .sort((a, b) => a.localeCompare(b));
+  if (servers.length === 0) {
+    ctx.ui.notify("Enable or add an MCP server before setting up Jev semantic search.", "error");
+    return false;
+  }
+  const configuredJev = state.config.settings?.jev;
+  const payloadDisclosure = configuredJev && configuredJev.scriptEvaluation
+    ? " Allowed servers can also be sources for script evaluations, which may send state and MCP results."
+    : " Semantic search does not send tool results.";
+
+  const choice = await ctx.ui.select("Configure Jev semantic search", [
+    `Use all ${servers.length} enabled servers (default)`,
+    "Restrict to selected servers",
+    "Cancel",
+  ]);
+  if (!choice || choice === "Cancel") return false;
+
+  let allowedServers: string[];
+  if (choice.startsWith("Use all ")) {
+    const confirmed = await ctx.ui.confirm(
+      "Share MCP tool metadata with Jev?",
+      `Semantic searches send the query text, server names, tool paths, tool names, and descriptions from ${servers.length} servers to the configured Jev endpoint.${payloadDisclosure}`,
+    );
+    if (!confirmed) return false;
+    allowedServers = servers;
+  } else {
+    allowedServers = [];
+    for (const server of servers) {
+      if (await ctx.ui.confirm(
+        `Allow ${server}?`,
+        `Semantic searches send the query text, server name, tool paths, tool names, and descriptions to the configured Jev endpoint.${payloadDisclosure}`,
+      )) allowedServers.push(server);
+    }
+    if (allowedServers.length === 0) {
+      ctx.ui.notify("Jev setup cancelled because no servers were allowed.", "info");
+      return false;
+    }
+  }
+
+  try {
+    const result = writeJevSemanticSearchConfig(configOverridePath, ctx.cwd, allowedServers, state.config.settings?.jev);
+    ctx.ui.notify(
+      result.changed
+        ? `Jev semantic search configured for ${allowedServers.length} server${allowedServers.length === 1 ? "" : "s"}. Reloading Pi…`
+        : "Jev semantic search is already configured for those servers.",
+      "info",
+    );
+    return result.changed;
+  } catch (error) {
+    ctx.ui.notify(`Jev setup failed: ${formatTerminalError(error)}`, "error");
+    return false;
+  }
 }
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
@@ -194,11 +285,11 @@ export async function reconnectServer(
   }
 
   try {
-    await state.manager.close(name);
     state.owner?.throwIfInactive();
-    const connection = signal
-      ? await state.manager.connect(name, definition, signal)
-      : await state.manager.connect(name, definition);
+    const current = state.manager.getConnection(name);
+    const connection = current
+      ? await state.manager.reconnect(name, definition, current, signal)
+      : await state.manager.connect(name, definition, signal);
     state.owner?.throwIfInactive();
     if (connection.status === "needs-auth") {
       if (ui) {

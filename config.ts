@@ -1,5 +1,5 @@
 // config.ts - Config loading with import support
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -9,6 +9,7 @@ import { getAgentPluginSummaries, loadAgentPluginConfigs, type AgentPluginSummar
 import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPluginEntries } from "./agent-plugin-provenance.ts";
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
+import { validateJevSettings } from "./jev-client.ts";
 import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
 import { parseJsonWithComments, toStringRecord } from "./utils.ts";
 
@@ -375,7 +376,15 @@ function mergeClaudePluginMcpDefaults(
     console.warn(`Claude plugin MCP server "${name}" is shadowed by higher-precedence server "${higherName}" because both normalize to the same namespace`);
     return false;
   }));
-  return mergeConfigs({ mcpServers: defaults }, higherPrecedenceConfig);
+  return applySettingDefaults(mergeConfigs({ mcpServers: defaults }, higherPrecedenceConfig));
+}
+
+function applySettingDefaults(config: McpConfig): McpConfig {
+  const exposeResources = config.settings?.exposeResources;
+  if (exposeResources === undefined) return config;
+  const mcpServers = Object.fromEntries(Object.entries(config.mcpServers)
+    .map(([name, entry]) => [name, entry.exposeResources === undefined ? { ...entry, exposeResources } : entry]));
+  return { ...config, mcpServers };
 }
 
 function getMergedSettings(overridePath?: string, cwd = process.cwd()): McpSettings | undefined {
@@ -846,9 +855,19 @@ function validateConfig(raw: unknown): McpConfig {
   return {
     mcpServers: toServerEntries(raw.mcpServers ?? raw["mcp-servers"]),
     ...(Array.isArray(raw.imports) ? { imports: raw.imports as ImportKind[] } : {}),
-    ...(raw.settings !== undefined ? { settings: raw.settings as McpSettings } : {}),
+    ...(raw.settings !== undefined ? { settings: parseSettings(raw.settings) } : {}),
     ...(raw.claudePlugins !== undefined ? { claudePlugins: parseClaudePlugins(raw.claudePlugins) } : {}),
   };
+}
+
+function parseSettings(value: unknown): McpSettings {
+  if (!isRecord(value)) throw new Error("settings must be an object");
+  const settings = { ...value } as McpSettings;
+  if (value.jev !== undefined) {
+    validateJevSettings(value.jev);
+    settings.jev = value.jev as NonNullable<McpSettings["jev"]>;
+  }
+  return settings;
 }
 
 function parseClaudePlugins(value: unknown): ClaudePluginConfig[] {
@@ -1139,11 +1158,67 @@ function readRawConfigObject(filePath: string): Record<string, unknown> {
   }
 }
 
+function writeConfigText(writePath: string, text: string): void {
+  let mode: number | undefined;
+  try {
+    writePath = realpathSync(writePath);
+    mode = statSync(writePath).mode & 0o777;
+  } catch {}
+  mkdirSync(dirname(writePath), { recursive: true });
+  const tmpPath = `${writePath}.${process.pid}.tmp`;
+  rmSync(tmpPath, { force: true });
+  try {
+    writeFileSync(tmpPath, text, mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
+    if (mode !== undefined) chmodSync(tmpPath, mode);
+    renameSync(tmpPath, writePath);
+  } catch (error) {
+    try { rmSync(tmpPath, { force: true }); } catch {}
+    throw error;
+  }
+}
+
 function writeRawConfigObject(filePath: string, raw: Record<string, unknown>): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
-  renameSync(tmpPath, filePath);
+  writeConfigText(filePath, `${JSON.stringify(raw, null, 2)}\n`);
+}
+
+export function writeSharedConfigText(filePath: string, text: string): void {
+  if (!isRecord(parseJsonWithComments(text))) throw new Error("top-level value must be an object");
+  writeConfigText(filePath, text);
+}
+
+export function writeJevSemanticSearchConfig(
+  overridePath: string | undefined,
+  cwd: string,
+  allowedServers: string[],
+  effectiveJev?: unknown,
+): { path: string; changed: boolean } {
+  const filePath = overridePath ? getPiGlobalConfigPath(overridePath) : getProjectPiConfigPath(cwd);
+  let raw: Record<string, unknown> = {};
+  if (existsSync(filePath)) {
+    try {
+      const parsed = parseJsonWithComments(readFileSync(filePath, "utf8"));
+      if (!isRecord(parsed)) throw new Error("top-level value must be an object");
+      raw = parsed;
+    } catch (error) {
+      throw new Error(`Failed to update Jev settings at ${filePath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+  }
+  if (raw.settings !== undefined && !isRecord(raw.settings)) {
+    throw new Error(`Failed to update Jev settings at ${filePath}: settings must be an object`);
+  }
+  const settings = raw.settings as Record<string, unknown> | undefined;
+  const currentJev = settings?.jev;
+  if (currentJev !== undefined && currentJev !== false && !isRecord(currentJev)) {
+    throw new Error(`Failed to update Jev settings at ${filePath}: settings.jev must be an object or false`);
+  }
+  const jev = isRecord(effectiveJev) ? effectiveJev : isRecord(currentJev) ? currentJev : {};
+  const nextServers = [...new Set(allowedServers)].sort((a, b) => a.localeCompare(b));
+  const nextJev = { ...jev, semanticSearch: true, allowedServers: nextServers };
+  validateJevSettings(nextJev);
+  if (isRecord(currentJev) && JSON.stringify(currentJev) === JSON.stringify(nextJev)) return { path: filePath, changed: false };
+  raw.settings = { ...settings, jev: nextJev };
+  writeRawConfigObject(filePath, raw);
+  return { path: filePath, changed: true };
 }
 
 function getServersObject(raw: Record<string, unknown>): Record<string, ServerEntry> {

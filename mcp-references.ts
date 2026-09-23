@@ -7,6 +7,7 @@ import {
   isServerDisabled,
   isToolAllowed,
   resolveToolPrefix,
+  resolveUniqueNameOwnership,
   type CachedTool,
   type McpConfig,
   type ServerCacheEntry,
@@ -97,6 +98,7 @@ function hasNamespaceProxy(
   existingDirectNames: ReadonlySet<string>,
   serverName: string,
 ): boolean {
+  if (config.settings?.namespaceProxyTools === false) return false;
   const definition = config.mcpServers[serverName];
   if (!definition || isServerDisabled(definition)) return false;
   if (isMcpServerDirectlyRegistered(definition, config.settings, serverName, envOverride)) return false;
@@ -146,14 +148,14 @@ function registeredDirectNames(
   envOverride: DirectToolSelectorOverride | null,
   selectorIndex: ToolSelectorCandidateIndex | undefined,
 ): Map<string, DirectNameOwner> {
-  const owners = new Map<string, DirectNameOwner>();
+  const entries: Array<{ name: string; owner: DirectNameOwner }> = [];
   for (const { serverName, definition, entry, prefix } of cachedServers(config, cache)) {
     const selection = resolveDirectSelection(config, definition, serverName, envOverride);
     for (const { name, originalName } of directNameEntries(entry, serverName, definition, prefix, selection, selectorIndex)) {
-      if (!owners.has(name)) owners.set(name, { serverName, originalName });
+      entries.push({ name, owner: { serverName, originalName } });
     }
   }
-  return owners;
+  return new Map(resolveUniqueNameOwnership(entries, (entry) => entry.name).unique.map(({ name, owner }) => [name, owner]));
 }
 
 function allCurrentCandidates(config: McpConfig, cache: MetadataCache | null): ToolSelectorCandidateIndex | undefined {

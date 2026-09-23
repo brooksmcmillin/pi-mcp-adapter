@@ -101,6 +101,11 @@ export declare function cloneMcpConfig(config: McpConfig): McpConfig;
 export declare function loadMcpConfig(overridePath?: string, cwd?: string): McpConfig;
 export declare function resolveConfiguredClaudePluginMcp(config: McpConfig, cwd?: string): McpConfig;
 export declare function discoverConfiguredClaudePluginSkills(config: McpConfig, cwd?: string): string[];
+export declare function writeSharedConfigText(filePath: string, text: string): void;
+export declare function writeJevSemanticSearchConfig(overridePath: string | undefined, cwd: string, allowedServers: string[], effectiveJev?: unknown): {
+    path: string;
+    changed: boolean;
+};
 export interface ServerDisabledOverrideResult {
     path: string;
     changed: boolean;

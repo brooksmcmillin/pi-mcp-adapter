@@ -1,5 +1,5 @@
 import { SdkErrorCode, SdkHttpError } from "@modelcontextprotocol/client";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,6 +43,16 @@ const mocks = vi.hoisted(() => ({
   httpTransports: [] as HttpTransportMock[],
   sseTransports: [] as HttpTransportMock[],
 }));
+
+function shellArg(value: string): string {
+  return process.platform === "win32"
+    ? `"${value.replace(/"/g, '""')}"`
+    : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function nodeCommand(source: string, ...args: string[]): string {
+  return `!${[process.execPath, "-e", source, ...args].map(shellArg).join(" ")}`;
+}
 
 vi.mock("@modelcontextprotocol/client", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -293,6 +303,130 @@ describe("McpServerManager HTTP bearer auth", () => {
     })).rejects.toThrow("Failed to read bearer token for remote");
 
     expect(mocks.httpTransports).toHaveLength(0);
+  });
+
+  it("cancels eager bearer command resolution with its connection attempt", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-mcp-bearer-connect-abort-"));
+    const started = join(directory, "started");
+    const completed = join(directory, "completed");
+    const command = nodeCommand(
+      "const fs=require('node:fs');fs.writeFileSync(process.argv[1],'started');setTimeout(()=>{fs.writeFileSync(process.argv[2],'completed');process.stdout.write('token\\n')},2000)",
+      started,
+      completed,
+    );
+    const controller = new AbortController();
+    const manager = new (await import("../server-manager.ts")).McpServerManager();
+    try {
+      const pending = manager.connect("remote", {
+        url: "https://example.test/mcp",
+        auth: "bearer",
+        bearerToken: command,
+      }, controller.signal);
+      while (!existsSync(started)) await new Promise(resolve => setTimeout(resolve, 10));
+      controller.abort(new Error("cancel bearer connect"));
+
+      await expect(pending).rejects.toThrow("cancel bearer connect");
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(existsSync(completed)).toBe(false);
+      expect(mocks.httpTransports).toHaveLength(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes a command-backed bearer after its TTL", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), "pi-mcp-bearer-http-"));
+    const counterPath = join(fixtureDirectory, "counter.txt");
+    const command = nodeCommand(
+      "const fs=require('node:fs'),p=process.argv[1],n=fs.existsSync(p)?+fs.readFileSync(p,'utf8')+1:1;fs.writeFileSync(p,String(n));process.stdout.write(`rotating-jwt-${n}\\n`)",
+      counterPath,
+    );
+    process.env.PI_MCP_ADAPTER_BEARER_COMMAND_TTL_MS = "5";
+
+    try {
+      const manager = new McpServerManager();
+      await manager.connect("remote", {
+        url: "https://example.test/mcp",
+        auth: "bearer",
+        bearerToken: command,
+      });
+
+      const transport = mocks.httpTransports.at(-1)!;
+      const fetch = transport.options.fetch!;
+      expect(transport.options.requestInit?.headers?.Authorization).toBeUndefined();
+      expect(fetch).toBeTypeOf("function");
+
+      const seenAuth: string[] = [];
+      const probe = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+        const auth = new Request(input, init).headers.get("Authorization");
+        if (auth) seenAuth.push(auth);
+        return new Response("", { status: 200 });
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = probe as typeof globalThis.fetch;
+      try {
+        await fetch(new URL("https://example.test/mcp"), { method: "POST" });
+        await new Promise(r => setTimeout(r, 20));
+        await fetch(new URL("https://example.test/mcp"), { method: "POST" });
+        await new Promise(r => setTimeout(r, 20));
+        await fetch(new URL("https://example.test/mcp"), { method: "POST" });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(seenAuth.length).toBe(3);
+      const numbers = seenAuth.map(s => Number(s.replace("Bearer rotating-jwt-", "")));
+      expect(numbers[0]).toBeLessThan(numbers[1]);
+      expect(numbers[1]).toBeLessThan(numbers[2]);
+    } finally {
+      delete process.env.PI_MCP_ADAPTER_BEARER_COMMAND_TTL_MS;
+      rmSync(fixtureDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps requestHeadersCommand as the final Authorization authority", async () => {
+    const manager = new (await import("../server-manager.ts")).McpServerManager();
+    const originalFetch = globalThis.fetch;
+    const seen: Array<{ authorization: string | null; method: string; body: string; source: string | null }> = [];
+    globalThis.fetch = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const request = new Request(input, init);
+      seen.push({
+        authorization: request.headers.get("authorization"),
+        method: request.method,
+        body: await request.text(),
+        source: request.headers.get("x-source"),
+      });
+      return new Response("ok", { status: 200 });
+    }) as typeof globalThis.fetch;
+    try {
+      await manager.connect("remote", {
+        url: "https://example.test/mcp",
+        auth: "bearer",
+        bearerToken: nodeCommand("process.stdout.write('bearer-command-token\\n')"),
+        requestHeadersCommand: {
+          command: process.execPath,
+          args: ["-e", 'process.stdin.resume(); process.stdin.on("end", () => console.log(JSON.stringify({Authorization:"Bearer final-command"})))'],
+        },
+      });
+      const input = new Request("https://example.test/mcp", {
+        method: "POST",
+        headers: { "x-source": "input-request" },
+        body: "request-body",
+      });
+      const response = await mocks.httpTransports.at(-1)!.options.fetch!(input as unknown as URL);
+      expect(await response.text()).toBe("ok");
+      expect(seen).toEqual([{
+        authorization: "Bearer final-command",
+        method: "POST",
+        body: "request-body",
+        source: "input-request",
+      }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await manager.closeAll();
+    }
   });
 
   it("uses configured headers without implicit OAuth", async () => {

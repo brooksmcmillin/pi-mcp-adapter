@@ -20,7 +20,7 @@ import type {
   ToolMetadata,
   PromptMetadata,
 } from "./types.ts";
-import { createToolSelectorCandidateIndex, formatPromptCommandName, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix, type ToolPrefix, type ToolSelectorCandidateIndex } from "./types.ts";
+import { createToolSelectorCandidateIndex, formatPromptCommandName, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix, resolveUniqueNameOwnership, type ToolPrefix, type ToolSelectorCandidateIndex } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import {
   extractToolUiStreamMode,
@@ -202,7 +202,6 @@ export function reconstructToolMetadata(
   sharedSelectorCandidateIndex?: ToolSelectorCandidateIndex,
 ): ToolMetadata[] {
   const metadata: ToolMetadata[] = [];
-  const seenNames = new Set<string>();
   const effectivePrefix = resolveToolPrefix(definition, prefix);
   const hasToolFilters =
     (Array.isArray(definition.includeTools) && definition.includeTools.length > 0) ||
@@ -223,11 +222,6 @@ export function reconstructToolMetadata(
     }
 
     const name = formatToolName(tool.name, serverName, effectivePrefix);
-    if (seenNames.has(name)) {
-      continue;
-    }
-    seenNames.add(name);
-
     metadata.push({
       name,
       originalName: tool.name,
@@ -249,11 +243,6 @@ export function reconstructToolMetadata(
       }
 
       const name = formatToolName(baseName, serverName, effectivePrefix);
-      if (seenNames.has(name)) {
-        continue;
-      }
-      seenNames.add(name);
-
       metadata.push({
         name,
         originalName: baseName,
@@ -263,7 +252,7 @@ export function reconstructToolMetadata(
     }
   }
 
-  return metadata;
+  return resolveUniqueNameOwnership(metadata, (tool) => tool.name).unique;
 }
 
 export function createCachedToolSelectorCandidateIndex(
