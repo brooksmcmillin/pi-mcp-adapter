@@ -10,6 +10,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - OAuth credentials can use session-only storage with `settings.oauthPersistence: "session"`, isolating concurrent Pi sessions without persisting tokens.
+- Added an opt-in Serply preset to `/mcp setup` for Google, News, and Scholar search and page fetching. It reads the API key from `SERPLY_API_KEY`. Thanks to [@googio](https://github.com/googio) for [PR #710](https://github.com/nicobailon/pi-mcp-adapter/pull/710).
+- Added `pi-mcp-adapter/host-managed` for applications that embed Pi and own their MCP connections. The host supplies the transports, records each approved call before a single-use `dispatch()` sends it, sees the raw result first, and decides when the adapter starts and closes. The adapter never resends a call or reconnects, and never reads config, OAuth, or keyring state. See [Host-managed embedding](README.md#host-managed-embedding). Thanks to [@LeonEthan](https://github.com/LeonEthan) for the design in [issue #716](https://github.com/nicobailon/pi-mcp-adapter/issues/716).
+
+### Changed
+
+- The default OAuth callback now uses `http://127.0.0.1:<port>/callback` instead of `localhost`, as RFC 8252 recommends. Authorization servers that reject `localhost`, such as Lovable, now work without a `redirectUri` override. If a server only accepts the `localhost` URI, set `oauth.redirectUri` to it. Thanks to [@ebysofyan](https://github.com/ebysofyan) for [issue #711](https://github.com/nicobailon/pi-mcp-adapter/issues/711) and [PR #712](https://github.com/nicobailon/pi-mcp-adapter/pull/712).
+
+### Fixed
+
+- Pi no longer warns "MCP: Project servers blocked: … (blocked by project trust)" at startup for a project you already trust, including one trusted through a parent folder. The warning came from the adapter starting `eager` or `keep-alive` servers before Pi had checked project trust. That early start now skips project servers, and the trust check and approval prompt still run at session start. Thanks to [@pnym-ai](https://github.com/pnym-ai) for reporting [issue #713](https://github.com/nicobailon/pi-mcp-adapter/issues/713).
+- Direct tools no longer disappear from a session when another Pi session writes different metadata for the same server to the shared cache, or when the cache entry expires, is deleted, or the server disconnects while idle. Each session now keeps the tools and resources it discovered itself. A configuration change still drops them, and the shared cache is written the same way as before. Thanks to [@NoahWTeng](https://github.com/NoahWTeng) for [PR #718](https://github.com/nicobailon/pi-mcp-adapter/pull/718).
+- A server's `mcp__<server>` tool comes back after its connection-failure backoff ends. Before, on Pi versions without `unregisterTool`, it stayed hidden for the rest of the session. A tool you turned off yourself stays off. Thanks to [@fer-git](https://github.com/fer-git) for [issue #717](https://github.com/nicobailon/pi-mcp-adapter/issues/717).
+- `mcpScript` works when Pi runs as a Bun-compiled executable. Before, every call failed with `Cannot find package 'quickjs-wasi'` from the sandbox worker. Thanks to [@fmoda3](https://github.com/fmoda3) for [issue #720](https://github.com/nicobailon/pi-mcp-adapter/issues/720).
+
+## [3.1.0] - 2026-09-27
+
+### Highlights
+
+- Approving a project's MCP servers once now covers every git worktree of that repository, so new worktrees stop asking again.
+- The project-server approval prompt no longer disappears after `/reload` or when another extension takes over the editor. Before, that could leave MCP stuck starting and add up to 30 seconds to every prompt.
+- When a server can't connect, the agent now sees the actual error instead of just "failed".
+- Config files are safer: files saved with a Windows byte order mark now load, and a config file the adapter can't parse is no longer overwritten.
+- A dependency update fixes a high-severity denial-of-service bug in TOML config parsing.
+
+### Changed
+
+- Project MCP server approvals are now shared across a repository's git worktrees. Approving a server in one checkout covers the same folder in the others, so a new worktree no longer asks again unless the server definition differs. This works for regular, bare, and `--separate-git-dir` repositories; only the main checkout of a `--separate-git-dir` repository asks once on its own. Thanks to [@MauricioRobayo](https://github.com/MauricioRobayo) for [issue #708](https://github.com/nicobailon/pi-mcp-adapter/issues/708).
+
+### Fixed
+
+- The project MCP server approval prompt now stays on screen until you answer it, including after `/reload` and panel saves. Before, `/reload` or another extension replacing the editor could hide it, leave MCP stuck starting, and make each prompt wait up to 30 seconds. Thanks to [@Gybra](https://github.com/Gybra) for [issue #690](https://github.com/nicobailon/pi-mcp-adapter/issues/690) and [PR #691](https://github.com/nicobailon/pi-mcp-adapter/pull/691), and to [@nazerim](https://github.com/nazerim) for [issue #695](https://github.com/nicobailon/pi-mcp-adapter/issues/695).
+- Disabled project MCP servers no longer ask for approval or delay interactive startup. Thanks to [@ismailokta](https://github.com/ismailokta) for reporting [issue #685](https://github.com/nicobailon/pi-mcp-adapter/issues/685).
+- The approval prompt now labels its path as the project config that needs approval, instead of calling it the server's source. A project file that only enables a server you defined globally no longer looks like it defines the command. Thanks to [@nazerim](https://github.com/nazerim) for reporting [issue #695](https://github.com/nicobailon/pi-mcp-adapter/issues/695).
+- When a server fails to connect, the agent now sees why. `mcp({})` status, the `mcp` tool's "not available" replies, and direct tools show the connection error (for example `spawn demo ENOENT`) next to "failed 12s ago", shortened to one line. Before, only `/mcp-adapter status` and the panel showed it.
+- MCP config files saved with a UTF-8 byte order mark, as some Windows editors do, now load instead of failing to parse. This covers adapter, shared, and imported JSON configs and imported TOML configs, and `pi-mcp-adapter init` keeps the servers in such a file. Thanks to [@quifox](https://github.com/quifox) for [PR #697](https://github.com/nicobailon/pi-mcp-adapter/pull/697).
+- Adding servers, imports, or direct tools no longer overwrites an existing MCP config file that fails to parse or has the wrong shape. The adapter reports the error and leaves the file alone; empty files can still be set up. Thanks to [@quifox](https://github.com/quifox) for [PR #693](https://github.com/nicobailon/pi-mcp-adapter/pull/693).
+- Repeating a word in an MCP tool search no longer hides tools that match it. Thanks to [@kojizada490-wq](https://github.com/kojizada490-wq) for [PR #678](https://github.com/nicobailon/pi-mcp-adapter/pull/678).
+- Searching the `/mcp-adapter` panel by server name now finds disabled or unconnected servers, so you can select and enable them. Thanks to [@nazerim](https://github.com/nazerim) for reporting [issue #696](https://github.com/nicobailon/pi-mcp-adapter/issues/696).
+- When Jev semantic search times out, is rate limited, or is unavailable, the lexical fallback now returns only tools from `settings.jev.allowedServers`, as the semantic results already did. Thanks to [@quifox](https://github.com/quifox) for [PR #698](https://github.com/nicobailon/pi-mcp-adapter/pull/698).
+- Changing a stdio server's `inheritEnv` or `literalEnv` setting now refreshes its cached tools, so search and direct tools no longer show stale entries. Thanks to [@kojizada490-wq](https://github.com/kojizada490-wq) for [PR #683](https://github.com/nicobailon/pi-mcp-adapter/pull/683).
+
+### Security
+
+- `smol-toml` now requires 1.9.0 or later, which fixes a high-severity denial of service on malformed TOML. The lockfile also moves `hono`, which comes in through the MCP SDK, to a release with its moderate advisories fixed, so `npm audit` on a lockfile install reports no production vulnerabilities. Thanks to [@jvpacini-CW](https://github.com/jvpacini-CW) for [PR #694](https://github.com/nicobailon/pi-mcp-adapter/pull/694).
+
+## [3.0.0] - 2026-09-26
+
+### Highlights
+
+- The adapter now has its own config file, `mcp-adapter.json`, so it can run alongside Pi's upcoming built-in MCP support without starting the same servers twice. If you used `mcp.json` with the adapter, rename it (see Breaking).
+- Opening a repository no longer starts its MCP servers on its own. Project servers wait until you trust the project and approve each server.
+- `mcpScript` code now runs in a QuickJS sandbox that scripts cannot escape to reach your files or processes.
+- MCP servers can now match each request to the Pi tool call that made it.
+
+### Breaking
+
+- The adapter no longer reads `<Pi agent dir>/mcp.json` or `.pi/mcp.json`. Those files now belong to Pi's built-in MCP support. Rename yours to `mcp-adapter.json` in the same folder. The format is the same, so `mv` is enough; if `mcp-adapter.json` already exists, merge the two. Until you do, Pi shows a warning with the exact command. `.mcp.json`, `~/.config/mcp/mcp.json`, and `--mcp-config` work as before.
+- The interactive command is now `/mcp-adapter`. `/mcp` still works as a shortcut when Pi's built-in MCP extension is not installed.
+
+### Security
+
+- `mcpScript` now runs scripts in a memory-limited QuickJS/WASM sandbox instead of Node's `vm` module, which scripts could escape to reach `process`, the filesystem, or child processes ([#676](https://github.com/nicobailon/pi-mcp-adapter/issues/676)). Each script can emit up to 16 MiB of output, and error messages are capped at 64 KiB. Values pass between the script and Pi as JSON, so values that are not plain JSON still show up but may be formatted differently than before.
+- MCP servers defined by a project no longer start until the project is trusted and you approve the server. This covers `.mcp.json`, `.pi/mcp-adapter.json`, and servers a project brings in through imports, plugins, repo-local host configs, or Pi packages in its settings. In an untrusted project they stay blocked. In a trusted interactive session, Pi shows the server's command or URL and asks once; the approval is saved, and Pi asks again if the server definition changes. Headless sessions skip unapproved servers unless your user-global config sets `settings.projectServers` to `"allow"`. `/mcp-adapter status` shows why a server is blocked. Fixes [#675](https://github.com/nicobailon/pi-mcp-adapter/issues/675).
+
+### Added
+
+- MCP tool calls now include the id of the Pi tool call that made them, under `_meta["pi-mcp-adapter/toolCallId"]`, so servers can match requests to Pi's tool calls in their logs and traces. Direct tools, the `mcp` tool, and `mcp__<server>` tools send it. `mcpScript` calls do not, because a script is not a single tool call. Thanks to [@sebavalaris](https://github.com/sebavalaris) for [PR #673](https://github.com/nicobailon/pi-mcp-adapter/pull/673).
+
+## [2.38.0] - 2026-09-26
+
+### Highlights
+
+- Search-mode tools become full direct tools after a successful proxy call, without requiring a separate search first.
+- Runtime-registered keep-alive servers now publish their tools even when Pi starts with no enabled MCP servers.
+- Compact `mcpScript` results show which tools ran, how often they ran, and how many calls failed.
+- Stdio configurations support home-relative paths, and MCP UI windows can open in Orca.
+- OpenCode v2 imports, OAuth credential access, and Rust MCP schemas are more reliable.
+
+### Added
+
+- A successful `mcp({ tool })` call now activates a held `directTools: "search"` tool, so later calls use its full schema even if the model skipped search. Thanks to [@chiptoe-svg](https://github.com/chiptoe-svg) for [PR #670](https://github.com/nicobailon/pi-mcp-adapter/pull/670).
+- MCP stdio server commands, arguments, and working directories now support home-relative paths. Thanks to [@FRFlo](https://github.com/FRFlo) for [PR #655](https://github.com/nicobailon/pi-mcp-adapter/pull/655).
+- Set `MCP_UI_VIEWER=orca` to open MCP UI windows in Orca. Thanks to [@jaesimio](https://github.com/jaesimio) for [PR #654](https://github.com/nicobailon/pi-mcp-adapter/pull/654).
+
+### Fixed
+
+- Keep-alive servers registered at runtime now connect and publish their tools even when no configured servers are enabled at startup. Thanks to [@ahodges22](https://github.com/ahodges22) for [issue #671](https://github.com/nicobailon/pi-mcp-adapter/issues/671).
+- Valid `ancestorConfigRoots` entries that do not contain the current working directory are ignored without warnings. Invalid entries still warn. Thanks to [@TheEdgeOfRage](https://github.com/TheEdgeOfRage) for [issue #668](https://github.com/nicobailon/pi-mcp-adapter/issues/668) and [PR #669](https://github.com/nicobailon/pi-mcp-adapter/pull/669).
+- Collapsed `mcpScript` results now show the tools called, repeat counts, and a visible failure count instead of only the first output line. Unsafe or ambiguous tool names are quoted and escaped, and script code remains hidden. Thanks to [@sargismarkosyan](https://github.com/sargismarkosyan) for [PR #666](https://github.com/nicobailon/pi-mcp-adapter/pull/666).
+- Metadata refreshes no longer reactivate an `mcp` gateway tool removed by the host. On hosts without `unregisterTool`, the adapter can still hide the gateway when direct tools cover the server and restore it when needed. Thanks to [@xulongwu4](https://github.com/xulongwu4) for [PR #665](https://github.com/nicobailon/pi-mcp-adapter/pull/665).
+- `mcpScript` no longer asks models to load its intentionally hidden manual skill. Thanks to [@k03mad](https://github.com/k03mad) for [#659](https://github.com/nicobailon/pi-mcp-adapter/issues/659).
+- OAuth credential reads now reuse a healthy keyring Entry without retaining secret values, avoiding repeated native sessions while still observing external updates. Thanks to [@mmarabel](https://github.com/mmarabel) for [#657](https://github.com/nicobailon/pi-mcp-adapter/issues/657).
+- Suppressing MCP UI windows with `MCP_UI_VIEWER=none` / `off` / `disabled` no longer prints raw output into the TUI. Thanks to [@andreafspeziale](https://github.com/andreafspeziale) for [#656](https://github.com/nicobailon/pi-mcp-adapter/issues/656).
+- The published package now includes the OAuth guide linked from the README. Thanks to [@dajiaohuang](https://github.com/dajiaohuang) for [PR #653](https://github.com/nicobailon/pi-mcp-adapter/pull/653).
+- OpenCode v2 configs now import. Servers under `mcp.servers` are picked up, `disabled: true` servers are skipped, and the snake_case OAuth fields `client_id`, `client_secret`, and `auth_server_metadata_url` are mapped. OpenCode v1 configs keep working. Thanks to [@sleroq](https://github.com/sleroq) for [PR #650](https://github.com/nicobailon/pi-mcp-adapter/pull/650).
+- Tools from Rust MCP servers, such as DBX, no longer print Ajv `unknown format "uint64" ignored` warnings on every call. Number formats like `uint64`, `uint32`, `uint`, and `uint8` are now recognized, and `type`/`minimum` still validate the values. Thanks to [@nightlitten](https://github.com/nightlitten) for [#649](https://github.com/nicobailon/pi-mcp-adapter/issues/649).
 
 ## [2.37.0] - 2026-09-23
 
@@ -814,7 +910,7 @@ The ranked search scoring, did-you-mean suggestions, approval patterns, endpoint
 
 ### Changed
 
-- Updated config precedence to prefer shared MCP files first, then Pi overrides, with `.pi/mcp.json` acting as the final Pi-specific project override.
+- At the time, updated config precedence to prefer shared MCP files first, with `.pi/mcp.json` as the final project override. This legacy layout is superseded by the `mcp-adapter.json` hard cutover documented above.
 - Updated Claude Code compatibility probing to prefer modern Claude MCP config locations before legacy paths.
 - Updated project scaffolding so generated `.mcp.json` files are safe minimal shells instead of fake placeholder servers that fail on first reload.
 - Updated the setup panel and README for clearer first-run guidance, improved spacing, and a more digestible shared-MCP-first setup story.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Readable } from "node:stream";
@@ -61,7 +61,7 @@ describe("cli init helper", () => {
     expect(exitCode).toBe(0);
     expect(errors).toEqual([]);
 
-    const piConfigPath = join(home, ".pi", "agent", "mcp.json");
+    const piConfigPath = join(home, ".pi", "agent", "mcp-adapter.json");
     expect(existsSync(piConfigPath)).toBe(true);
     const config = JSON.parse(readFileSync(piConfigPath, "utf-8"));
     expect(config.imports).toContain("claude-code");
@@ -86,7 +86,7 @@ describe("cli init helper", () => {
     expect(exitCode).toBe(0);
     expect(errors).toEqual([]);
     expect(logs.join("\n")).toContain(`codex: ${codexConfigPath}`);
-    expect(logs.join("\n")).toContain("Detected host configs to import into Pi: codex");
+    expect(logs.join("\n")).toContain("Detected host configs to import into the MCP adapter: codex");
     expect(existsSync(join(home, ".pi", "agent", "mcp.json"))).toBe(false);
   });
 
@@ -97,7 +97,7 @@ describe("cli init helper", () => {
     process.chdir(project);
 
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(join(home, ".pi", "agent", "mcp.json"), `{
+    writeFileSync(join(home, ".pi", "agent", "mcp-adapter.json"), `{
       // Existing config stays editable by humans.
       "imports": ["vscode",],
       "mcpServers": {
@@ -115,7 +115,88 @@ describe("cli init helper", () => {
     const output = logs.join("\n");
     expect(output).toContain(`User-global .agents MCP: ${join(home, ".agents", "mcp.json")}`);
     expect(output).toContain(`User-global .agents nested MCP: ${join(home, ".agents", "mcp", "mcp.json")}`);
-    expect(output).toContain("No Pi config changes needed.");
+    expect(output).toContain("No MCP adapter config changes needed.");
+  });
+
+  it("preserves existing servers when init updates a config with a UTF-8 BOM", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-cli-bom-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-cli-bom-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    const configPath = join(home, ".pi", "agent", "mcp-adapter.json");
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, '\uFEFF{"mcpServers":{"existing":{"command":"existing-server"}}}');
+    writeJson(join(home, ".cursor", "mcp.json"), { mcpServers: { imported: { command: "cursor-server" } } });
+
+    const { main } = await import("../cli.js");
+    expect(await main(["init", "--discover-host-configs"], () => {}, () => {})).toBe(0);
+    const saved = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(saved.mcpServers.existing).toEqual({ command: "existing-server" });
+    expect(saved.imports).toContain("cursor");
+  });
+
+  it("initializes an existing whitespace-only config", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-cli-blank-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-cli-blank-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    const path = join(home, ".pi", "agent", "mcp-adapter.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "  \n");
+
+    const { main } = await import("../cli.js");
+    expect(await main(["init", "--discover-host-configs"], () => {}, () => {})).toBe(0);
+    expect(JSON.parse(readFileSync(path, "utf-8")).settings.hostConfigDiscovery).toBe("on");
+  });
+
+  it("preserves a comment-only config during init", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-cli-comment-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-cli-comment-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    const path = join(home, ".pi", "agent", "mcp-adapter.json");
+    const contents = "// Keep this note.\n";
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents);
+
+    const { main } = await import("../cli.js");
+    await expect(main(["init", "--discover-host-configs"], () => {}, () => {})).rejects.toThrow();
+    expect(readFileSync(path, "utf-8")).toBe(contents);
+  });
+
+  it.each([
+    ["an array root", "[]"],
+    ["non-string imports", '{"imports":["cursor",42]}'],
+    ["non-object settings", '{"settings":42}'],
+  ])("preserves %s when init would update the config", async (_kind, contents) => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-cli-invalid-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-cli-invalid-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    const path = join(home, ".pi", "agent", "mcp-adapter.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents);
+
+    const { main } = await import("../cli.js");
+    await expect(main(["init", "--discover-host-configs"])).rejects.toThrow(`Invalid MCP config at ${path}`);
+    expect(readFileSync(path, "utf-8")).toBe(contents);
+  });
+
+  it("does not write through a config symlink whose target is missing", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-cli-broken-link-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-cli-broken-link-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    const path = join(home, ".pi", "agent", "mcp-adapter.json");
+    const target = join(home, ".pi", "agent", "missing.json");
+    mkdirSync(dirname(path), { recursive: true });
+    symlinkSync(target, path);
+
+    const { main } = await import("../cli.js");
+    await expect(main(["init", "--discover-host-configs"])).rejects.toThrow();
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(existsSync(target)).toBe(false);
   });
 
   it("explicitly enables host fallback discovery without changing external files", async () => {
@@ -134,7 +215,7 @@ describe("cli init helper", () => {
 
     expect(exitCode).toBe(0);
     expect(errors).toEqual([]);
-    const piConfigPath = join(home, ".pi", "agent", "mcp.json");
+    const piConfigPath = join(home, ".pi", "agent", "mcp-adapter.json");
     expect(JSON.parse(readFileSync(piConfigPath, "utf-8")).settings).toEqual({ hostConfigDiscovery: "on" });
     expect(readFileSync(hostPath, "utf-8")).toContain("cursorServer");
     expect(logs.join("\n")).toContain("Opting in to host-specific fallback discovery");
@@ -162,7 +243,7 @@ describe("cli init helper", () => {
     expect(exitCode).toBe(0);
     expect(errors).toEqual([]);
 
-    const piConfigPath = join(agentDir, "mcp.json");
+    const piConfigPath = join(agentDir, "mcp-adapter.json");
     expect(existsSync(piConfigPath)).toBe(true);
     expect(existsSync(join(home, ".pi", "agent", "mcp.json"))).toBe(false);
     const config = JSON.parse(readFileSync(piConfigPath, "utf-8"));
@@ -190,9 +271,9 @@ describe("cli init helper", () => {
 
     expect(exitCode).toBe(0);
     expect(errors).toEqual([]);
-    expect(logs.join("\n")).toContain(`Pi global override: ${join(agentDir, "mcp.json")}`);
-    expect(logs.join("\n")).toContain(`Project Pi override: ${join(process.cwd(), ".arc", "mcp.json")}`);
-    expect(logs.join("\n")).toContain(`Dry run: would update ${join(agentDir, "mcp.json")}`);
+    expect(logs.join("\n")).toContain(`MCP adapter global override: ${join(agentDir, "mcp-adapter.json")}`);
+    expect(logs.join("\n")).toContain(`Project MCP adapter override: ${join(process.cwd(), ".arc", "mcp-adapter.json")}`);
+    expect(logs.join("\n")).toContain(`Dry run: would update ${join(agentDir, "mcp-adapter.json")}`);
     expect(existsSync(join(home, ".pi", "agent", "mcp.json"))).toBe(false);
   });
 
@@ -215,7 +296,7 @@ describe("cli init helper", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Config discovery:");
-    expect(result.stdout).toContain("No Pi config changes needed.");
+    expect(result.stdout).toContain("No MCP adapter config changes needed.");
   });
 
   it("explains that install now goes through `pi install`", async () => {

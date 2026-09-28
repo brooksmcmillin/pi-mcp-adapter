@@ -1,9 +1,15 @@
 import { execFile } from "node:child_process";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMcpAdapter } from "../index.ts";
 import { runMcpScript } from "../mcp-code.ts";
+import { loadMcpScriptWasm, resolveMcpScriptQuickJsUrl } from "../mcp-script-wasm.ts";
 import { executeCall } from "../proxy-modes.ts";
 import { buildToolMetadata } from "../tool-metadata.ts";
 import { McpServerManager } from "../server-manager.ts";
@@ -42,6 +48,8 @@ describe("runMcpScript", () => {
       description: expect.stringContaining("multiple MCP tool calls in one request"),
       promptSnippet: "Batch multiple MCP tool calls in one JavaScript request (loop, filter, chain)",
     }));
+    const scriptTool = registerTool.mock.calls.find(([tool]) => tool.name === "mcpScript")?.[0];
+    expect(scriptTool.description).not.toContain("Load the mcp-scripting skill");
     expect(registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "mcp_script" }));
   });
 
@@ -58,6 +66,48 @@ describe("runMcpScript", () => {
 
     expect(registerTool).toHaveBeenCalled();
     expect(registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "mcpScript" }));
+  });
+
+  it("retries loading QuickJS after a failed wasm read", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mcp-script-wasm-"));
+    const target = join(directory, "quickjs.wasm");
+    try {
+      await expect(loadMcpScriptWasm(target)).rejects.toThrow();
+      const source = createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm");
+      await copyFile(source, target);
+      await expect(loadMcpScriptWasm(target)).resolves.toBeDefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the sandbox worker where the quickjs-wasi package name cannot resolve", async () => {
+    // Bun-compiled executables cannot resolve bare packages from the worker file (#720).
+    const quickjsUrl = resolveMcpScriptQuickJsUrl();
+    expect(quickjsUrl).toBe(pathToFileURL(createRequire(import.meta.url).resolve("quickjs-wasi")).href);
+    const directory = await mkdtemp(join(tmpdir(), "mcp-script-worker-"));
+    const workerPath = join(directory, "mcp-script-worker.mjs");
+    await copyFile(fileURLToPath(new URL("../mcp-script-worker.mjs", import.meta.url)), workerPath);
+    const worker = new Worker(pathToFileURL(workerPath), {
+      workerData: {
+        code: "return 6 * 7;",
+        wasm: await loadMcpScriptWasm(),
+        quickjsUrl,
+        interrupt: new SharedArrayBuffer(4),
+        outputMaxBytes: 1024 * 1024,
+      },
+      env: {},
+    });
+    try {
+      const message = await new Promise<unknown>((resolve, reject) => {
+        worker.once("message", resolve);
+        worker.once("error", reject);
+      });
+      expect(message).toEqual({ type: "done", returnBlock: expect.objectContaining({ text: "42" }) });
+    } finally {
+      await worker.terminate();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it.runIf(Number.parseInt(process.versions.node, 10) >= 24)(
@@ -657,6 +707,46 @@ return await tools.call("fixture_echo", { value: first.data.structuredContent.ec
     expect(textBlocks(result)).toEqual(["first", "[console.log] second", "last"]);
   });
 
+  it("stops scripts that exceed the emitted output budget and keeps prior blocks", async () => {
+    const result = await runMcpScript(
+      state,
+      'emit("before limit"); for (let i = 0; i < 17; i++) console.log("x".repeat(1024 * 1024)); emit("after limit");',
+    );
+
+    const blocks = textBlocks(result);
+    expect(blocks[0]).toContain("before limit");
+    expect(blocks.join("\n")).not.toContain("after limit");
+    expect(result.details).toMatchObject({
+      error: "script_error",
+      message: "mcpScript output exceeds the 16 MiB per-script budget",
+    });
+  });
+
+  it("counts image metadata against the emitted output budget", async () => {
+    const result = await runMcpScript(
+      state,
+      `emit("before images");
+      for (let i = 0; i < 17; i++) emit({ type: "image", data: "", mimeType: "x".repeat(1024 * 1024) });
+      emit("after images");`,
+    );
+
+    expect(textBlocks(result)).toContain("before images");
+    expect(textBlocks(result)).not.toContain("after images");
+    expect(result.details).toMatchObject({
+      error: "script_error",
+      message: "mcpScript output exceeds the 16 MiB per-script budget",
+    });
+  });
+
+  it("truncates oversized thrown values before returning them to the host", async () => {
+    const result = await runMcpScript(state, 'throw "x".repeat(1024 * 1024);');
+    const message = String(result.details.message);
+
+    expect(result.details).toMatchObject({ error: "script_error" });
+    expect(Buffer.byteLength(message, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(message).toMatch(/\n\.\.\.\[mcpScript error truncated\]$/);
+  });
+
   it("formats non-JSON values in emitted, returned, and console output", async () => {
     const result = await runMcpScript(
       state,
@@ -699,5 +789,47 @@ return await tools.call("fixture_echo", { value: first.data.structuredContent.ec
       message: "tools is not enumerable — use tools.search({ query })",
       globals: ["undefined", "undefined", "undefined"],
     });
+  });
+
+  it("keeps injected function constructors inside QuickJS", async () => {
+    const result = await runMcpScript(state, `
+      const probes = [emit, tools.fixture_echo, console.log].map((fn) =>
+        fn.constructor("return [typeof process, typeof require, typeof fetch, typeof setTimeout]")());
+      return probes;
+    `);
+
+    expect(JSON.parse(textBlocks(result)[0])).toEqual([
+      ["undefined", "undefined", "undefined", "undefined"],
+      ["undefined", "undefined", "undefined", "undefined"],
+      ["undefined", "undefined", "undefined", "undefined"],
+    ]);
+  });
+
+  it("terminates a runaway microtask chain", async () => {
+    const result = await runMcpScript(state, `
+      await new Promise(() => {
+        const spin = () => Promise.resolve().then(spin);
+        spin();
+      });
+    `, 300);
+
+    expect(result.details).toMatchObject({ error: "timeout", timeoutMs: 300 });
+  });
+
+  it("reports QuickJS memory exhaustion as a script error", async () => {
+    const result = await runMcpScript(state, `
+      const values = [];
+      while (true) values.push("x".repeat(1024 * 1024) + values.length);
+    `, 5_000);
+
+    expect(result.details).toMatchObject({ error: "script_error" });
+    expect(textBlocks(result).at(-1)).toMatch(/out of memory/i);
+  });
+
+  it("reports deep recursion as a script error instead of trapping the worker", async () => {
+    const result = await runMcpScript(state, "function recurse() { return recurse(); } recurse();");
+
+    expect(result.details).toMatchObject({ error: "script_error" });
+    expect(textBlocks(result).at(-1)).toMatch(/stack (?:overflow|size exceeded)/i);
   });
 });

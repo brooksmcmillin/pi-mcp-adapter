@@ -66,7 +66,7 @@ function estimateTokens(tool: CachedTool): number {
   return Math.ceil((tool.name.length + descLen + schemaLen) / 4) + 10;
 }
 
-type ConnectionStatus = "connected" | "idle" | "failed" | "needs-auth" | "connecting" | "disabled";
+type ConnectionStatus = "connected" | "idle" | "failed" | "needs-auth" | "connecting" | "blocked" | "disabled";
 
 interface ToolState {
   name: string;
@@ -405,6 +405,7 @@ class McpPanelView implements Component {
 
   private renderConnectionStatus(state: McpPanelViewState, server: ServerState): string {
     if (state.authInFlight === server.name) return `  ${this.theme.needsAuth("authenticating")}`;
+    if (server.connectionStatus === "blocked") return `  ${this.theme.needsAuth("blocked by project trust")}`;
     if (server.disabled) return `  ${this.theme.description("disabled")}`;
     if (server.connectionStatus === "needs-auth") return `  ${this.theme.needsAuth("needs auth")}`;
     if (server.connectionStatus === "connecting") return `  ${this.theme.needsAuth("connecting")}`;
@@ -611,12 +612,13 @@ class McpPanel {
 
     if (query && !this.authOnly) {
       this.visibleItems = this.visibleItems.filter((item) => {
-        if (item.type === "server") {
-          return this.visibleItems.some(
-            (other) => other.type === "tool" && other.serverIndex === item.serverIndex,
-          );
-        }
-        return true;
+        if (item.type !== "server") return true;
+        const server = this.servers[item.serverIndex];
+        // Servers without cached tools (disabled, never connected) can only match by name.
+        if (mode === "name" && server && fuzzyScore(query, server.name) > 0) return true;
+        return this.visibleItems.some(
+          (other) => other.type === "tool" && other.serverIndex === item.serverIndex,
+        );
       });
     }
   }
@@ -733,7 +735,7 @@ class McpPanel {
       const item = this.visibleItems[this.cursorIndex];
       if (!item) return;
       const server = this.servers[item.serverIndex];
-      if (!server) return;
+      if (!server || server.connectionStatus === "blocked") return;
       if (item.type === "server") {
         if (server.connectionStatus === "disabled") return;
         if (this.authOnly || server.connectionStatus === "needs-auth") {
@@ -773,7 +775,7 @@ class McpPanel {
       const item = this.visibleItems[this.cursorIndex];
       if (!item || item.type !== "server" || this.authOnly) return;
       const server = this.servers[item.serverIndex];
-      if (!server) return;
+      if (!server || server.connectionStatus === "blocked") return;
       server.disabled = !server.disabled;
       this.updateDirty();
       this.tui.requestRender();
@@ -833,7 +835,7 @@ class McpPanel {
 
   private authenticateServer(server: ServerState): void {
     if (this.authInFlight) return;
-    if (server.connectionStatus === "connecting" || server.connectionStatus === "disabled") return;
+    if (server.connectionStatus === "connecting" || server.connectionStatus === "disabled" || server.connectionStatus === "blocked") return;
     const serverName = sanitizeDisplayText(server.name);
     if (!this.callbacks.canAuthenticate(server.name)) {
       this.authNotice = `${serverName} does not use OAuth authentication.`;
@@ -868,7 +870,7 @@ class McpPanel {
   }
 
   private reconnectServer(server: ServerState, options: { afterAuth?: boolean } = {}): void {
-    if (server.connectionStatus === "connecting" || server.connectionStatus === "disabled") return;
+    if (server.connectionStatus === "connecting" || server.connectionStatus === "disabled" || server.connectionStatus === "blocked") return;
     const serverName = sanitizeDisplayText(server.name);
     server.connectionStatus = "connecting";
     this.tui.requestRender();

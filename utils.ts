@@ -6,8 +6,12 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node
 import stripJsonComments from "strip-json-comments";
 import type { McpConfig, ServerEntry } from "./types.ts";
 
+export function stripUtf8Bom(raw: string): string {
+  return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+}
+
 export function parseJsonWithComments(raw: string): unknown {
-  return JSON.parse(stripJsonComments(raw, { trailingCommas: true }));
+  return JSON.parse(stripJsonComments(stripUtf8Bom(raw), { trailingCommas: true }));
 }
 
 /** Resolve a candidate only when its real path stays within the real root. */
@@ -247,10 +251,18 @@ export function resolveServerUrl(definition: Pick<ServerEntry, "url">, environme
 export function resolveConfigPath(value: string | undefined, environment: NodeJS.ProcessEnv = process.env): string | undefined {
   if (value === undefined) return undefined;
 
-  const resolved = interpolateEnvVars(value, environment);
+  return expandHomePath(interpolateEnvVars(value, environment));
+}
+
+/** Expand a leading home-directory marker without interpolating environment variables. */
+export function expandHomePath(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+
+  const resolved = value;
   if (resolved === "~") return homedir();
-  if (resolved.startsWith("~/") || resolved.startsWith("~\\")) {
-    return join(homedir(), resolved.slice(2));
+  if (resolved.startsWith("~/") || (platform() === "win32" && resolved.startsWith("~\\"))) {
+    const suffix = platform() === "win32" ? resolved.slice(2).replace(/[\\/]/g, sep) : resolved.slice(2);
+    return join(homedir(), suffix);
   }
   return resolved;
 }
@@ -332,6 +344,17 @@ export function truncateAtWord(text: string, target: number): string {
   }
 
   return truncated + "...";
+}
+
+/** Request `_meta` key that lets MCP servers correlate a call with the Pi tool call that made it. */
+export const TOOL_CALL_ID_REQUEST_META_KEY = "pi-mcp-adapter/toolCallId";
+
+export function withToolCallIdMeta(
+  meta: Record<string, unknown> | undefined,
+  toolCallId: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!toolCallId) return meta;
+  return { ...meta, [TOOL_CALL_ID_REQUEST_META_KEY]: toolCallId };
 }
 
 export function normalizeDirectToolInputSchema(schema: unknown): Record<string, unknown> {

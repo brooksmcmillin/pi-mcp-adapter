@@ -107,7 +107,7 @@ export function tokenize(value: string): string[] {
       previous = character;
     }
   }
-  return tokens;
+  return [...new Set(tokens)];
 }
 
 function matchesAsciiStem(fieldToken: string, queryToken: string): boolean {
