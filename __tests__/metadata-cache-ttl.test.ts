@@ -126,6 +126,32 @@ describe("metadata cache ttl hints", () => {
       .map(tool => tool.originalName)).not.toContain("read_old");
   });
 
+  it.each([
+    { command: "node", args: ["other-server.js"] },
+    { ...definition(), exposeResources: false },
+  ])("does not retain runtime resources across configuration changes: %j", (replacement) => {
+    const server = { ...definition(), directTools: true as const };
+    const connection = {
+      status: "connected", definition: server,
+      tools: [{ name: "search" }], resources: [{ name: "old", uri: "file://old" }],
+      resourceDiscoveryFailed: false,
+    };
+    const state = {
+      config: { mcpServers: { demo: server } },
+      manager: { getConnection: () => connection },
+      sessionMetadata: new Map<string, ServerCacheEntry>(),
+    };
+    updateMetadataCache(state as any, "demo");
+    expect(state.sessionMetadata.get("demo")?.resources).toHaveLength(1);
+    state.config.mcpServers.demo = { ...replacement, directTools: true };
+    connection.definition = state.config.mcpServers.demo;
+    connection.resources = [];
+    connection.resourceDiscoveryFailed = true;
+    updateMetadataCache(state as any, "demo");
+    expect(state.sessionMetadata.get("demo")?.resources).toEqual([]);
+    expect(loadMetadataCache()?.servers.demo.resources).toEqual([]);
+  });
+
   it("does not revive invalid zero-TTL resources after failed discovery", () => {
     const server = { ...definition(), directTools: true as const };
     saveMetadataCache({

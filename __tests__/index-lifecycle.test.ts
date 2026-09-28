@@ -9,6 +9,7 @@ import { MCP_APPROVAL_CUSTOM_TYPE, getToolApprovalIdentity, makeToolApprovalKey 
 
 const mocks = vi.hoisted(() => ({
   initializeMcp: vi.fn(),
+  holdProjectTrust: false,
   clearFailure: vi.fn(),
   updateStatusBar: vi.fn(),
   flushMetadataCache: vi.fn(),
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   cloneMcpConfig: vi.fn((config: unknown) => structuredClone(config)),
   discoverConfiguredClaudePluginSkills: vi.fn(() => []),
   resolveConfiguredClaudePluginMcp: vi.fn((config: unknown) => structuredClone(config)),
+  getLegacyMcpMigrationNotices: vi.fn(() => []),
   loadMetadataCache: vi.fn(() => null),
   buildProxyDescription: vi.fn(() => "MCP gateway"),
   createDirectToolExecutor: vi.fn(() => vi.fn()),
@@ -38,7 +40,7 @@ const mocks = vi.hoisted(() => ({
   openMcpPanel: vi.fn(),
   openMcpSetup: vi.fn(),
   setupJevSemanticSearch: vi.fn(),
-  getPiGlobalConfigPath: vi.fn(() => "/tmp/agent/mcp.json"),
+  getPiGlobalConfigPath: vi.fn(() => "/tmp/agent/mcp-adapter.json"),
   getProjectConfigPath: vi.fn(() => "/tmp/project/.mcp.json"),
   writeSharedServerEntry: vi.fn((path: string) => path),
   writeProjectServerDisabledOverride: vi.fn(() => ({ path: "/tmp/project/.pi/mcp.json", changed: true })),
@@ -70,11 +72,18 @@ const mocks = vi.hoisted(() => ({
   truncateAtWord: vi.fn((text: string) => text),
 }));
 
+// Real initialization resolves project-server trust before connecting servers.
+const initializeMcpResolvingTrust = vi.hoisted(() => (...args: unknown[]) => {
+  const initialization = mocks.initializeMcp(...args);
+  if (!mocks.holdProjectTrust) (args[3] as { onProjectTrustResolved?: () => void } | undefined)?.onProjectTrustResolved?.();
+  return initialization;
+});
+
 vi.mock("../init.ts", async () => {
   mocks.coreModuleStarted();
   if (mocks.coreModuleGate) await mocks.coreModuleGate;
   return {
-    initializeMcp: mocks.initializeMcp,
+    initializeMcp: initializeMcpResolvingTrust,
     clearFailure: mocks.clearFailure,
     updateStatusBar: mocks.updateStatusBar,
     flushMetadataCache: mocks.flushMetadataCache,
@@ -98,6 +107,7 @@ vi.mock("../config.ts", () => ({
   cloneMcpConfig: mocks.cloneMcpConfig,
   discoverConfiguredClaudePluginSkills: mocks.discoverConfiguredClaudePluginSkills,
   resolveConfiguredClaudePluginMcp: mocks.resolveConfiguredClaudePluginMcp,
+  getLegacyMcpMigrationNotices: mocks.getLegacyMcpMigrationNotices,
   getPiGlobalConfigPath: mocks.getPiGlobalConfigPath,
   getProjectConfigPath: mocks.getProjectConfigPath,
   writeSharedServerEntry: mocks.writeSharedServerEntry,
@@ -217,7 +227,7 @@ function createState() {
   } as any;
 }
 
-function createPi(options: { unregisterTool?: false | ((name: string) => boolean) } = {}) {
+function createPi(options: { unregisterTool?: false | ((name: string) => boolean); commands?: Array<Record<string, unknown>> } = {}) {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let activeTools = ["bash", "mcp", "demo_search"];
   const unregisterTool =
@@ -236,6 +246,7 @@ function createPi(options: { unregisterTool?: false | ((name: string) => boolean
       }),
       events: { on: vi.fn(), emit: vi.fn() },
       getAllTools: vi.fn(() => []),
+      getCommands: vi.fn(() => options.commands ?? []),
       getActiveTools: vi.fn(() => activeTools),
       setActiveTools: vi.fn((nextActiveTools: string[]) => {
         activeTools = nextActiveTools;
@@ -378,6 +389,7 @@ describe("mcpAdapter session lifecycle", () => {
       }
     }
     mocks.coreModuleGate = null;
+    mocks.holdProjectTrust = false;
     mocks.oauthModuleGate = null;
     mocks.commandsModuleGate = null;
     mocks.proxyModuleGate = null;
@@ -392,6 +404,7 @@ describe("mcpAdapter session lifecycle", () => {
     mocks.cloneMcpConfig.mockImplementation((config: unknown) => structuredClone(config));
     mocks.discoverConfiguredClaudePluginSkills.mockReturnValue([]);
     mocks.resolveConfiguredClaudePluginMcp.mockImplementation((config: unknown) => structuredClone(config));
+    mocks.getLegacyMcpMigrationNotices.mockReturnValue([]);
     mocks.loadMetadataCache.mockReturnValue(null);
     mocks.buildProxyDescription.mockReturnValue("MCP gateway");
     mocks.createDirectToolExecutor.mockReturnValue(vi.fn());
@@ -403,7 +416,7 @@ describe("mcpAdapter session lifecycle", () => {
     });
     mocks.getMissingConfiguredDirectToolServers.mockReturnValue([]);
     mocks.resolveDirectTools.mockReturnValue([]);
-    mocks.getPiGlobalConfigPath.mockReturnValue("/tmp/agent/mcp.json");
+    mocks.getPiGlobalConfigPath.mockReturnValue("/tmp/agent/mcp-adapter.json");
     mocks.getProjectConfigPath.mockReturnValue("/tmp/project/.mcp.json");
     mocks.writeSharedServerEntry.mockImplementation((path: string) => path);
     mocks.getConfigPathFromArgv.mockReturnValue(undefined);
@@ -422,13 +435,20 @@ describe("mcpAdapter session lifecycle", () => {
     }
   });
 
-  it("registers mcp and pi-mcp commands while keeping mcp-auth separate", async () => {
-    const { api } = await loadAdapter();
+  it("always registers mcp-adapter and adds the mcp alias at session start without built-in MCP", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { api, handlers } = await loadAdapter();
 
-    const commandNames = api.registerCommand.mock.calls.map((call: any[]) => call[0]);
-    expect(commandNames.filter((name: string) => name === "mcp")).toHaveLength(1);
-    expect(commandNames.filter((name: string) => name === "pi-mcp")).toHaveLength(1);
+    let commandNames = api.registerCommand.mock.calls.map((call: any[]) => call[0]);
+    expect(commandNames.filter((name: string) => name === "mcp-adapter")).toHaveLength(1);
+    expect(commandNames.filter((name: string) => name === "mcp")).toHaveLength(0);
     expect(commandNames.filter((name: string) => name === "mcp-auth")).toHaveLength(1);
+
+    await handlers.get("session_start")?.({}, { hasUI: false, cwd: "/project" });
+    await handlers.get("session_start")?.({}, { hasUI: false, cwd: "/project" });
+    commandNames = api.registerCommand.mock.calls.map((call: any[]) => call[0]);
+    expect(commandNames.filter((name: string) => name === "mcp")).toHaveLength(1);
   });
 
   it("discovers configured Claude plugin skills on startup and reload", async () => {
@@ -795,6 +815,34 @@ describe("mcpAdapter session lifecycle", () => {
     expect(state.lifecycle.ensureConverged).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps session_start open until project-server approval is answered", async () => {
+    mocks.holdProjectTrust = true;
+    const config = {
+      mcpServers: {
+        demo: { url: "https://example.test/mcp", lifecycle: "keep-alive" },
+      },
+    };
+    const state = createState();
+    const initialization = createDeferred<typeof state>();
+    let resolveProjectTrust: (() => void) | undefined;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.initializeMcp.mockImplementation((_pi: unknown, _ctx: unknown, _owner: unknown, options: { onProjectTrustResolved?: () => void }) => {
+      resolveProjectTrust = options.onProjectTrustResolved;
+      return initialization.promise;
+    });
+
+    const { handlers } = await loadAdapter();
+    let sessionStarted = false;
+    const sessionStart = Promise.resolve(handlers.get("session_start")?.({}, {}))
+      .then(() => { sessionStarted = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(sessionStarted).toBe(false);
+
+    resolveProjectTrust?.();
+    await sessionStart;
+    expect(sessionStarted).toBe(true);
+  });
+
   it("bounds the first-input wait when initialization stalls", async () => {
     vi.useFakeTimers();
     try {
@@ -1064,12 +1112,12 @@ describe("mcpAdapter session lifecycle", () => {
     expect(state.config.mcpServers.demo).toEqual({ url: "https://demo.example.com/mcp", directTools: false });
     expect(state.lifecycle.registerServer).toHaveBeenCalledWith("demo", state.config.mcpServers.demo, undefined);
     expect(mocks.writeSharedServerEntry).toHaveBeenCalledWith(
-      "/tmp/agent/mcp.json",
+      "/tmp/agent/mcp-adapter.json",
       "demo",
       { url: "https://demo.example.com/mcp" },
     );
     expect(result.details).toMatchObject({ mode: "install", status: "connected", server: "demo" });
-    expect(result.details.path).toBe("/tmp/agent/mcp.json");
+    expect(result.details.path).toBe("/tmp/agent/mcp-adapter.json");
   });
 
   it("denies agent install before parsing or side effects", async () => {
@@ -1121,7 +1169,7 @@ describe("mcpAdapter session lifecycle", () => {
       { action: "install", url: "https://forex-dev.1above.io/mcp", server: "forex", target: "project" },
       undefined,
       undefined,
-      { cwd: "/tmp/project" },
+      { cwd: "/tmp/project", hasUI: true, isProjectTrusted: () => true, ui: { confirm: vi.fn().mockResolvedValue(true) } },
     );
 
     expect(mocks.writeSharedServerEntry).toHaveBeenCalledWith(
@@ -1132,6 +1180,26 @@ describe("mcpAdapter session lifecycle", () => {
     expect(mocks.executeAuthStart).toHaveBeenCalledWith(state, "forex", undefined);
     expect(result.details).toMatchObject({ mode: "install", status: "awaiting_auth", server: "forex" });
     expect(result.details.path).toBe("/tmp/project/.mcp.json");
+  });
+
+  it("blocks project installation before connecting when the project is untrusted", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { api, handlers } = await loadAdapter();
+    await handlers.get("session_start")?.({}, {});
+    const proxyTool = registeredTool(api, "mcp");
+
+    const result = await proxyTool.execute(
+      "call-install",
+      { action: "install", url: "https://example.test/mcp", server: "blocked", target: "project" },
+      undefined,
+      undefined,
+      { cwd: "/tmp/project", hasUI: false, isProjectTrusted: () => false },
+    );
+
+    expect(result.details).toMatchObject({ error: "project_trust_required", server: "blocked" });
+    expect(mocks.executeConnect).not.toHaveBeenCalled();
+    expect(mocks.writeSharedServerEntry).not.toHaveBeenCalled();
   });
 
   it("reuses the configured name for an already installed URL", async () => {
@@ -1300,6 +1368,97 @@ describe("mcpAdapter session lifecycle", () => {
     expect(result.details).toMatchObject({ mode: "install", error: "validation_failed" });
   });
 
+  it.each([0, 1000])("retains each session's discovered catalogue independently of shared disk metadata (TTL %i)", async (ttlMs) => {
+    const dir = mkdtempSync(resolve(tmpdir(), "mcp-session-catalogue-"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+    try {
+      const cache = await vi.importActual<typeof import("../metadata-cache.ts")>("../metadata-cache.ts");
+      const core = await vi.importActual<typeof import("../init.ts")>("../init.ts");
+      const direct = await vi.importActual<typeof import("../direct-tool-surface.ts")>("../direct-tool-surface.ts");
+      mocks.loadMetadataCache.mockImplementation(cache.loadMetadataCache);
+      mocks.resolveDirectTools.mockImplementation(direct.resolveDirectTools);
+      mocks.getMissingConfiguredDirectToolServers.mockImplementation(direct.getMissingConfiguredDirectToolServers);
+      const { default: mcpAdapter } = await import("../index.ts");
+      const sessions = [];
+      for (const allowed of ["review", "create"]) {
+        const config = { mcpServers: { shared: {
+          url: "https://shared.example/mcp", lifecycle: "eager" as const,
+          directTools: true as const, includeTools: ["read", "read_record", allowed],
+        } } };
+        const connection = {
+          status: "connected", definition: config.mcpServers.shared,
+          tools: ["read", "review", "create"].map(name => ({ name, inputSchema: { type: "object" } })),
+          resources: [{ name: "record", uri: `file:///${allowed}` }],
+          resourceDiscoveryFailed: false, toolListHints: { ttlMs },
+        };
+        const state = createState();
+        state.config = config;
+        state.manager.getAllConnections = () => new Map([["shared", connection]]);
+        state.manager.getConnection.mockReturnValue(connection);
+        core.updateMetadataCache(state as any, "shared");
+        mocks.loadMcpConfig.mockReturnValue(config);
+        mocks.initializeMcp.mockResolvedValue(state);
+        const { api, handlers } = createPi();
+        const active = trackRuntimeToolActivation(api, ["bash", "mcp"]);
+        mcpAdapter(api);
+        await handlers.get("session_start")?.({}, {});
+        await handlers.get("before_agent_start")?.({ systemPrompt: "test" }, {});
+        await vi.waitFor(() => expect(state.onToolMetadataUpdated).toBeTypeOf("function"));
+        sessions.push({ state, active, connection, handlers, allowed });
+      }
+      const assertCatalogue = (session: typeof sessions[number]) => {
+        expect(session.active().filter(name => name.startsWith("shared_")).sort())
+          .toEqual(["shared_read", "shared_read_record", `shared_${session.allowed}`].sort());
+      };
+      const diskBytes = readFileSync(cache.getMetadataCachePath(), "utf8");
+      for (const session of sessions) {
+        await session.state.onToolMetadataUpdated!("shared", "check");
+        assertCatalogue(session);
+      }
+      expect(readFileSync(cache.getMetadataCachePath(), "utf8")).toBe(diskBytes);
+      const reviewer = sessions[0];
+      reviewer.connection.resources = [];
+      reviewer.connection.resourceDiscoveryFailed = true;
+      core.updateMetadataCache(reviewer.state as any, "shared");
+      await reviewer.state.onToolMetadataUpdated!("shared", "resource-discovery-failed");
+      assertCatalogue(reviewer);
+      expect(reviewer.state.sessionMetadata?.get("shared")?.resources)
+        .toEqual([{ name: "record", uri: "file:///review" }]);
+      rmSync(cache.getMetadataCachePath());
+      for (const session of sessions) {
+        session.state.manager.getAllConnections = () => new Map();
+        await session.state.onToolMetadataUpdated!("shared", "idle");
+        assertCatalogue(session);
+      }
+      const writer = sessions[1];
+      const originalDefinition = writer.state.config.mcpServers.shared;
+      for (const definition of [
+        { ...originalDefinition, disabled: true },
+        { ...originalDefinition, url: "https://changed.example/mcp" },
+        { ...originalDefinition, includeTools: ["review"] },
+      ]) {
+        writer.state.config.mcpServers.shared = definition;
+        core.updateMetadataCache(writer.state as any, "shared");
+        await writer.state.onToolMetadataUpdated!("shared", "config-change");
+        expect(writer.active().filter(name => name.startsWith("shared_"))).toEqual([]);
+        writer.state.config.mcpServers.shared = originalDefinition;
+        await writer.state.onToolMetadataUpdated!("shared", "config-restored");
+        assertCatalogue(writer);
+      }
+      reviewer.connection.tools = [];
+      reviewer.connection.resourceDiscoveryFailed = false;
+      core.updateMetadataCache(reviewer.state as any, "shared");
+      await reviewer.state.onToolMetadataUpdated!("shared", "tools-list-changed");
+      expect(reviewer.active().filter(name => name.startsWith("shared_"))).toEqual([]);
+      await sessions[1].state.onToolMetadataUpdated!("shared", "peer-change");
+      assertCatalogue(sessions[1]);
+      for (const session of sessions) await session.handlers.get("session_shutdown")?.({}, {});
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("hot-loads zero-TTL live tools and resources while leaving the disk entry non-cacheable", async () => {
     const actualDirectTools = await vi.importActual<typeof import("../direct-tool-surface.ts")>("../direct-tool-surface.ts");
     const actualCache = await vi.importActual<typeof import("../metadata-cache.ts")>("../metadata-cache.ts");
@@ -1359,16 +1518,15 @@ describe("mcpAdapter session lifecycle", () => {
         resources: [],
         resourceDiscoveryFailed: true,
       });
+      const liveEntry = {
+        ...diskEntry,
+        tools: actualCache.serializeTools(connections.get("demo").tools),
+        resources: actualCache.serializeResources(connections.get("demo").resources),
+      };
+      currentState.sessionMetadata = new Map([["demo", liveEntry]]);
       mocks.loadMetadataCache.mockReturnValue({
         version: 1,
-        servers: {
-          demo: {
-            ...diskEntry,
-            tools: actualCache.serializeTools(connections.get("demo").tools),
-            resources: actualCache.serializeResources(connections.get("demo").resources),
-          },
-          fallback: fallbackEntry,
-        },
+        servers: { demo: liveEntry, fallback: fallbackEntry },
       });
       await currentState.onToolMetadataUpdated?.("demo", "proxy-connect");
       return connectResult;
@@ -1445,6 +1603,178 @@ describe("mcpAdapter session lifecycle", () => {
     expect(activeTools()).toEqual([...activeBeforeConnect, "demo_search", "demo_read"]);
     expect(api.setActiveTools).not.toHaveBeenCalled();
   });
+
+  it("does not re-activate the mcp gateway tool after the host removed it from the active set", async () => {
+    const config = {
+      mcpServers: {
+        demo: { command: "demo", directTools: true },
+      },
+    };
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.resolveDirectTools
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValue([
+        { serverName: "demo", originalName: "search", prefixedName: "demo_search", description: "Search demo" },
+      ]);
+    mocks.initializeMcp.mockResolvedValue(state);
+    mocks.executeConnect.mockImplementation(async (currentState: any) => {
+      currentState.onToolMetadataUpdated?.("demo", "proxy-connect");
+      return { content: [{ type: "text", text: "connected" }] };
+    });
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    const activeTools = trackRuntimeToolActivation(api, ["bash", "mcp"]);
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await Promise.resolve();
+    await Promise.resolve();
+    const proxyTool = api.registerTool.mock.calls.find((call: any[]) => call[0].name === "mcp")?.[0];
+
+    // The host (e.g. a code-mode extension that routes MCP through its own tool) hides the gateway.
+    api.setActiveTools(["bash"]);
+    api.setActiveTools.mockClear();
+
+    await proxyTool.execute("call-1", { connect: "demo" });
+
+    expect(activeTools()).toEqual(["bash", "demo_search"]);
+    expect(api.setActiveTools).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("restores only an owned gateway fallback, relinquishing ownership on observed reactivation (observed: %s)", async (observedReactivation) => {
+    const config = {
+      settings: { disableProxyTool: true },
+      mcpServers: {
+        demo: { command: "demo", directTools: true },
+      },
+    };
+    const search = { serverName: "demo", originalName: "search", prefixedName: "demo_search", description: "Search demo" };
+    let specs: Array<typeof search> = [];
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.resolveDirectTools.mockImplementation(() => specs);
+    mocks.reconnectServers.mockImplementation(async (currentState: any) => {
+      currentState.onToolMetadataUpdated?.("demo", "command-reconnect");
+    });
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi({ unregisterTool: false });
+    const tracked = trackRuntimeToolActivation(api, ["bash"]);
+    const activeTools = () => tracked().filter((name) => name !== "mcpScript");
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(activeTools()).toEqual(["bash", "mcp"]);
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+
+    // Direct tools cover the server: the adapter soft-deactivates the gateway.
+    specs = [search];
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(activeTools()).toEqual(["bash", "demo_search"]);
+
+    specs = [];
+    if (observedReactivation) {
+      // The host activates mcp; a sync needing the gateway observes this and
+      // relinquishes the adapter's fallback ownership before host removal.
+      api.setActiveTools(["bash", "mcp", "demo_search"]);
+      await commandDef.handler("reconnect demo", { hasUI: false });
+      expect(activeTools()).toEqual(["bash", "mcp"]);
+      api.setActiveTools(["bash"]);
+    }
+
+    // Without reactivation, restore our fallback when direct tools disappear.
+    // After observed reactivation, respect the host's subsequent removal.
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(activeTools()).toEqual(observedReactivation ? ["bash"] : ["bash", "mcp"]);
+  });
+
+  it("does not claim gateway fallback ownership when the host active set is empty", async () => {
+    const config = {
+      settings: { disableProxyTool: false },
+      mcpServers: { demo: { command: "demo", directTools: true } },
+    };
+    const search = { serverName: "demo", originalName: "search", prefixedName: "demo_search", description: "Search demo" };
+    let specs: Array<typeof search> = [];
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.resolveDirectTools.mockImplementation(() => specs);
+    mocks.reconnectServers.mockImplementation(async (currentState: any) => {
+      currentState.onToolMetadataUpdated?.("demo", "command-reconnect");
+    });
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi({ unregisterTool: false });
+    const activeTools = trackRuntimeToolActivation(api, ["bash"]);
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await Promise.resolve();
+    await Promise.resolve();
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+
+    // Register the direct tool while the gateway remains enabled, then let
+    // the host empty its active set before fallback suppression is requested.
+    specs = [search];
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(activeTools()).toContain("mcp");
+    expect(activeTools()).toContain("demo_search");
+    api.setActiveTools([]);
+    config.settings.disableProxyTool = true;
+    api.setActiveTools.mockClear();
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(activeTools()).toEqual([]);
+    expect(api.setActiveTools).not.toHaveBeenCalled();
+
+    specs = [];
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(activeTools()).toEqual([]);
+    expect(api.setActiveTools).not.toHaveBeenCalled();
+  });
+
+  it("unregisters and re-registers the gateway when unregisterTool is available", async () => {
+    const config = {
+      settings: { disableProxyTool: true },
+      mcpServers: { demo: { command: "demo", directTools: true } },
+    };
+    const search = { serverName: "demo", originalName: "search", prefixedName: "demo_search", description: "Search demo" };
+    let specs: Array<typeof search> = [];
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.resolveDirectTools.mockImplementation(() => specs);
+    mocks.reconnectServers.mockImplementation(async (currentState: any) => {
+      currentState.onToolMetadataUpdated?.("demo", "command-reconnect");
+    });
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    const tracked = trackRuntimeToolActivation(api, ["bash"]);
+    const activeTools = () => tracked().filter((name) => name !== "mcpScript");
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(activeTools()).toEqual(["bash", "mcp"]);
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+
+    specs = [search];
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(api.unregisterTool).toHaveBeenCalledWith("mcp");
+    expect(activeTools()).toEqual(["bash", "demo_search"]);
+
+    specs = [];
+    await commandDef.handler("reconnect demo", { hasUI: false });
+    expect(activeTools()).toEqual(["bash", "mcp"]);
+  });
+
 
   it("returns the proxy connect result untouched when no direct tools were added", async () => {
     const config = {
@@ -1725,6 +2055,46 @@ describe("mcpAdapter session lifecycle", () => {
     }));
   });
 
+  it("re-activates namespace proxies hidden during failure backoff without unregisterTool", async () => {
+    const demoDefinition = { command: "demo" };
+    // An eager server makes session_start initialize instead of deferring.
+    const otherDefinition = { command: "other", lifecycle: "eager" };
+    const config = { mcpServers: { demo: demoDefinition, other: otherDefinition } };
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.loadMetadataCache.mockReturnValue({
+      version: 1,
+      servers: { demo: cacheEntry(demoDefinition), other: cacheEntry(otherDefinition) },
+    });
+    mocks.resolveDirectTools.mockReturnValue([]);
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi({ unregisterTool: false });
+    const activeTools = trackRuntimeToolActivation(api, ["bash", "mcp"]);
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await vi.waitFor(() => expect(mocks.updateStatusBar).toHaveBeenCalledWith(state));
+    expect(activeTools()).toEqual(expect.arrayContaining(["mcp__demo", "mcp__other"]));
+
+    // The host deactivates mcp__other itself; the adapter must not undo that.
+    api.setActiveTools(activeTools().filter((name) => name !== "mcp__other"));
+
+    state.failureTracker.set("demo", Date.now());
+    state.failureTracker.set("other", Date.now());
+    state.onToolMetadataUpdated?.("demo", "failure-backoff-started");
+    expect(api.unregisterTool).toBeUndefined();
+    expect(activeTools()).not.toContain("mcp__demo");
+
+    state.failureTracker.delete("demo");
+    state.failureTracker.delete("other");
+    state.onToolMetadataUpdated?.("demo", "failure-backoff-expired");
+
+    expect(activeTools()).toContain("mcp__demo");
+    expect(activeTools()).not.toContain("mcp__other");
+  });
+
   it("publishes connected status only after replacing stale cached direct tools", async () => {
     const config = {
       settings: { disableProxyTool: true },
@@ -1840,7 +2210,7 @@ describe("mcpAdapter session lifecycle", () => {
     await commandDef.handler("reconnect demo", { hasUI: false });
 
     expect(api.unregisterTool).toHaveBeenCalledWith("demo_search");
-    expect(api.setActiveTools).toHaveBeenCalledWith(["bash", "mcp"]);
+    expect(api.setActiveTools).not.toHaveBeenCalled();
     expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "mcp" }));
   });
 
@@ -1999,6 +2369,9 @@ describe("mcpAdapter session lifecycle", () => {
       undefined,
       expect.any(Function),
       undefined,
+      undefined,
+      undefined,
+      "call-1",
     );
   });
 
@@ -2109,6 +2482,9 @@ describe("mcpAdapter session lifecycle", () => {
       undefined,
       expect.any(Function),
       controller.signal,
+      undefined,
+      undefined,
+      "call-1",
     );
   });
 
@@ -2276,6 +2652,41 @@ describe("mcpAdapter session lifecycle", () => {
     defaultAdapter(createPi().api);
     expect(mocks.getConfigPathFromArgv).toHaveBeenCalledTimes(1);
     expect(mocks.loadMcpConfig).toHaveBeenCalledWith("/argv.json");
+  });
+
+  it("warns once at session start and surfaces the legacy-config notice in status", async () => {
+    const notice = "pi-mcp-adapter no longer reads /project/.pi/mcp.json. Move it with: mv old new";
+    mocks.getLegacyMcpMigrationNotices.mockReturnValue([notice]);
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { api, handlers } = await loadAdapter({ commands: [{ name: "mcp", sourceInfo: { path: "/adapter.ts" } }] });
+    const ui = { notify: vi.fn() };
+
+    await handlers.get("session_start")?.({}, { hasUI: true, ui, cwd: "/project" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ui.notify).toHaveBeenCalledTimes(1);
+    expect(ui.notify).toHaveBeenCalledWith(notice, "warning");
+
+    await registeredTool(api, "mcp").execute("status", {});
+    expect(mocks.executeStatus).toHaveBeenCalledWith(expect.objectContaining({ migrationNotices: [notice] }));
+  });
+
+  it("limits legacy config checks to adapter-only keys when Pi's built-in MCP command is detected", async () => {
+    mocks.getLegacyMcpMigrationNotices.mockReturnValue([]);
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { api, handlers } = await loadAdapter({ commands: [
+      { name: "mcp", sourceInfo: { path: "/adapter.ts" } },
+      { name: "mcp:1", sourceInfo: { path: "<inline:mcp>" } },
+    ] });
+    const ui = { notify: vi.fn() };
+
+    await handlers.get("session_start")?.({}, { hasUI: true, ui, cwd: "/project" });
+    expect(mocks.getLegacyMcpMigrationNotices).toHaveBeenCalledWith("/project", undefined, true);
+    const registeredNames = api.registerCommand.mock.calls.map(([name]: any[]) => name);
+    expect(registeredNames).toContain("mcp-adapter");
+    expect(registeredNames).not.toContain("mcp");
   });
 
   it("uses status notifications instead of ambient panels in memory-config mode", async () => {
@@ -2478,7 +2889,7 @@ describe("mcpAdapter session lifecycle", () => {
         mocks.coreModuleStarted();
         await gate.promise;
         return {
-          initializeMcp: mocks.initializeMcp,
+          initializeMcp: initializeMcpResolvingTrust,
           clearFailure: mocks.clearFailure,
           updateStatusBar: mocks.updateStatusBar,
           flushMetadataCache: mocks.flushMetadataCache,
@@ -3229,7 +3640,7 @@ describe("mcpAdapter session lifecycle", () => {
     expect(mocks.shutdownOAuth).toHaveBeenCalledTimes(1);
   });
 
-  it("completes current `/mcp` subcommands and server arguments", async () => {
+  it("completes current `/mcp-adapter` subcommands and server arguments", async () => {
     const state = createState();
     state.config.mcpServers = {
       github: { command: "github-mcp" },
@@ -3240,7 +3651,7 @@ describe("mcpAdapter session lifecycle", () => {
 
     const { api, handlers } = await loadAdapter();
 
-    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp-adapter")?.[1];
     expect(commandDef.getArgumentCompletions("reconnect ")).toBeNull();
 
     await handlers.get("session_start")?.({}, { hasUI: false });
@@ -3382,7 +3793,7 @@ describe("mcpAdapter session lifecycle", () => {
     await commandDef.handler("logout", { hasUI: true, ui });
 
     expect(mocks.logoutServer).not.toHaveBeenCalled();
-    expect(ui.notify).toHaveBeenCalledWith("Usage: /mcp logout <server>", "error");
+    expect(ui.notify).toHaveBeenCalledWith("Usage: /mcp-adapter logout <server>", "error");
   });
 
   it("triggers core reload after setup changes config", async () => {
@@ -3663,7 +4074,7 @@ describe("mcpAdapter session lifecycle", () => {
   });
 });
 
-describe("directTools: \"search\" — registered inactive, activated by search", () => {
+describe("directTools: \"search\" — registered inactive, activated by search or a proxy call", () => {
   const originalDirectTools = process.env.MCP_DIRECT_TOOLS;
   beforeEach(() => {
     delete process.env.MCP_DIRECT_TOOLS;
@@ -3674,6 +4085,7 @@ describe("directTools: \"search\" — registered inactive, activated by search",
     }
     mocks.cloneMcpConfig.mockImplementation((config: unknown) => structuredClone(config));
     mocks.resolveConfiguredClaudePluginMcp.mockImplementation((config: unknown) => structuredClone(config));
+    mocks.getLegacyMcpMigrationNotices.mockReturnValue([]);
     mocks.discoverConfiguredClaudePluginSkills.mockReturnValue([]);
     mocks.createOAuthRuntime.mockImplementation((signal: AbortSignal) => ({ signal }));
     mocks.initializeOAuth.mockResolvedValue(undefined);
@@ -3807,11 +4219,67 @@ describe("directTools: \"search\" — registered inactive, activated by search",
     expect(activeTools()).toEqual(["bash", "mcp", "demo_alpha"]);
   });
 
-  it("a proxy call for a held tool does not activate it", async () => {
-    const { activeTools, proxyTool } = await boot();
-    mocks.executeCall.mockResolvedValue({ content: [{ type: "text", text: "ok" }], details: { mode: "call", server: "demo", tool: "alpha" } });
+  const callResult = (details: Record<string, unknown>) => ({ content: [{ type: "text", text: "ok" }], details: { mode: "call", ...details } });
+
+  it("a successful proxy call for a held tool activates it and reports it as addedToolNames", async () => {
+    const { handlers, activeTools, proxyTool } = await boot();
+    mocks.executeCall.mockResolvedValue(callResult({ server: "demo", tool: "alpha", canonicalTool: "demo_alpha" }));
     const result = await proxyTool.execute("call-1", { tool: "demo_alpha", args: {} });
+    expect(activeTools()).toEqual(["bash", "mcp", "demo_alpha"]);
+    expect(result.addedToolNames).toEqual(["demo_alpha"]);
+    // The call's output comes back untouched (already sized to the output limits).
+    expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+    expect(result.details.activated).toEqual(["demo_alpha"]);
+    // Calling an already-active tool through the proxy changes nothing.
+    const again = await proxyTool.execute("call-2", { tool: "demo_alpha", args: {} });
+    expect(again.addedToolNames).toBeUndefined();
+    // Same lifetime as a search hit: kept across turns, cleared by the next session.
+    await handlers.get("before_agent_start")?.({}, {});
+    expect(activeTools()).toEqual(["bash", "mcp", "demo_alpha"]);
+    await handlers.get("session_start")?.({}, {});
+    expect(activeTools()).toEqual(["bash", "mcp"]);
+  });
+
+  it("a proxy call for a held resource reader activates it", async () => {
+    const reader = { ...lazySpec("read_notes"), resourceUri: "file:///notes.md" };
+    const { activeTools, proxyTool } = await boot({}, [reader, lazySpec("beta")]);
+    mocks.executeCall.mockResolvedValue(callResult({ server: "demo", resourceUri: "file:///notes.md", canonicalTool: "demo_read_notes" }));
+    const result = await proxyTool.execute("call-1", { tool: "demo_read_notes", args: {} });
+    expect(activeTools()).toEqual(["bash", "mcp", "demo_read_notes"]);
+    expect(result.addedToolNames).toEqual(["demo_read_notes"]);
+  });
+
+  it.each([
+    ["tool_not_found", { error: "tool_not_found", requestedTool: "demo_alpha" }],
+    ["a tool error", { error: "tool_error", server: "demo", tool: "alpha", canonicalTool: "demo_alpha" }],
+    ["an approval denial", { error: "approval_denied", server: "demo", tool: "alpha", canonicalTool: "demo_alpha" }],
+  ])("a proxy call that fails with %s activates nothing", async (_label, details) => {
+    const { activeTools, proxyTool } = await boot();
+    mocks.executeCall.mockResolvedValue(callResult(details));
+    const result = await proxyTool.execute("call-1", { tool: "demo_alpha", args: {} });
+    expect(activeTools()).toEqual(["bash", "mcp"]);
     expect(result.addedToolNames).toBeUndefined();
+  });
+
+  it("a proxy call naming another server's tool activates nothing", async () => {
+    const { activeTools, proxyTool } = await boot();
+    mocks.executeCall.mockResolvedValue(callResult({ server: "other", tool: "alpha", canonicalTool: "demo_alpha" }));
+    const result = await proxyTool.execute("call-1", { tool: "demo_alpha", args: {} });
+    expect(activeTools()).toEqual(["bash", "mcp"]);
+    expect(result.addedToolNames).toBeUndefined();
+  });
+
+  it("does not let a proxy call from a replaced session activate tools", async () => {
+    const { handlers, activeTools, proxyTool } = await boot();
+    const pendingCall = createDeferred<ReturnType<typeof callResult>>();
+    mocks.executeCall.mockReturnValue(pendingCall.promise);
+    const execution = proxyTool.execute("call-1", { tool: "demo_alpha", args: {} });
+    await vi.waitFor(() => expect(mocks.executeCall).toHaveBeenCalledOnce());
+
+    await handlers.get("session_start")?.({}, {});
+    pendingCall.resolve(callResult({ server: "demo", tool: "alpha", canonicalTool: "demo_alpha" }));
+
+    await expect(execution).rejects.toThrow("MCP extension session restarted");
     expect(activeTools()).toEqual(["bash", "mcp"]);
   });
 

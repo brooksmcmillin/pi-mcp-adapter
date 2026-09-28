@@ -216,14 +216,14 @@ export function buildProxyDescription(config: McpConfig): string {
     return selected === "search";
   });
   if (searchModeServers.length > 0) {
-    desc += `\nSearch-mode servers (${searchModeServers.join(", ")}): their tools become real, schema-backed tools the first time mcp({ search }) matches them — after that, call them directly by name.\n`;
+    desc += `\nSearch-mode servers (${searchModeServers.join(", ")}): their tools become real, schema-backed tools the first time mcp({ search }) matches them or mcp({ tool }) calls them — after that, call them directly by name.\n`;
   }
 
   const disabledServers = Object.entries(config.mcpServers)
     .filter(([, definition]) => isServerDisabled(definition))
     .map(([serverName]) => serverName);
   if (disabledServers.length > 0) {
-    desc += `\nDisabled servers (enable with /mcp enable <server> and /reload): ${disabledServers.join(", ")}\n`;
+    desc += `\nDisabled servers (enable with /mcp-adapter enable <server> and /reload): ${disabledServers.join(", ")}\n`;
   }
 
   desc += `\nUsage:\n`;

@@ -3,7 +3,7 @@ import type { ConsentManager } from "./consent-manager.ts";
 import type { McpLifecycleManager } from "./lifecycle.ts";
 import type { McpServerManager } from "./server-manager.ts";
 import type { AuthStorageOptions } from "./mcp-auth.ts";
-import type { ServerDefinition, ToolMetadata, PromptMetadata, McpConfig, UiSessionMessages, UiStreamSummary, McpStatusEventBus, UiServerHandle } from "./types.ts";
+import type { ServerDefinition, ToolMetadata, PromptMetadata, ServerCacheEntry, McpConfig, UiSessionMessages, UiStreamSummary, McpStatusEventBus, UiServerHandle, ProjectServerBlock } from "./types.ts";
 import type { UiResourceHandler } from "./ui-resource-handler.ts";
 import type { McpRuntimeOwner } from "./runtime-owner.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
@@ -33,6 +33,7 @@ export interface McpExtensionState {
   manager: McpServerManager;
   lifecycle: McpLifecycleManager;
   toolMetadata: Map<string, ToolMetadata[]>;
+  sessionMetadata?: Map<string, ServerCacheEntry>;
   /** Number of tools currently registered directly with Pi, by server. */
   directToolCounts: Map<string, number>;
   /** Resource counts retained separately because tool metadata includes resource tools. */
@@ -43,6 +44,8 @@ export interface McpExtensionState {
   serverInstructions: Map<string, string>;
   config: McpConfig;
   programmaticConfig?: boolean;
+  /** Session-scoped notices for legacy mcp.json files the adapter ignores. */
+  migrationNotices?: string[];
   /** Install validations must not publish durable cache entries before config persistence. */
   provisionalInstalls?: Set<string>;
   oauthRuntime: McpOAuthRuntime;
@@ -51,6 +54,8 @@ export interface McpExtensionState {
   failureMessages: Map<string, string>;
   /** Session-only approvals keyed by server, tool definition, and arguments. */
   approvedToolCalls: Map<string, true>;
+  /** Configured project servers disabled by trust or approval policy for this session. */
+  blockedProjectServers?: Map<string, ProjectServerBlock>;
   /** Runtime-only server grants. Never persisted or restored from session entries. */
   approvedServers?: Map<string, { definition: ServerDefinition; hash: string }>;
   /** Optional active-session sink for approval decisions. */

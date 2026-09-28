@@ -1,8 +1,10 @@
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { UrlElicitationRequiredError, type Client } from "@modelcontextprotocol/client";
 import type { McpExtensionState } from "./state.ts";
+import { disabledServerReason } from "./project-server-trust.ts";
 import type { DirectToolSpec, McpContent } from "./types.ts";
-import { lazyConnect, getFailureAgeSeconds, clearFailure } from "./init.ts";
+import { lazyConnect, clearFailure } from "./init.ts";
+import { describeFailure } from "./failure-backoff.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { formatSchema } from "./tool-metadata.ts";
 import { resolveMcpResultContent, transformMcpResourceContents } from "./tool-registrar.ts";
@@ -10,7 +12,7 @@ import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from 
 import { maybeStartUiSession, summarizeUiSessionResult, type UiSessionRuntime } from "./ui-session.ts";
 import { isServerDisabled } from "./types.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
-import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl } from "./utils.ts";
+import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl, withToolCallIdMeta } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
 import { callToolViaTaskSession } from "./mcp-tasks.ts";
@@ -127,7 +129,7 @@ export function createDirectToolExecutor(
   getInitPromise: () => Promise<McpExtensionState> | null,
   spec: DirectToolSpec
 ): DirectToolExecute {
-  return async function execute(_toolCallId, params, signal) {
+  return async function execute(toolCallId, params, signal) {
     throwIfAborted(signal);
     let state = getState();
     const initPromise = getInitPromise();
@@ -152,7 +154,7 @@ export function createDirectToolExecutor(
 
     const definition = state.config.mcpServers[spec.serverName];
     if (isServerDisabled(definition)) {
-      const message = `MCP server "${spec.serverName}" is disabled. Run /mcp enable ${spec.serverName} and /reload to enable it.`;
+      const message = `MCP server "${spec.serverName}" is ${disabledServerReason(state.blockedProjectServers, spec.serverName)}`;
       return {
         content: [{ type: "text" as const, text: message }],
         details: { error: "server_disabled", server: spec.serverName, message },
@@ -189,9 +191,9 @@ export function createDirectToolExecutor(
           details: { error: "auth_required", server: spec.serverName, message, autoAuthAttempted },
         };
       }
-      const failedAgo = getFailureAgeSeconds(state, spec.serverName);
+      const failure = describeFailure(state, spec.serverName);
       return {
-        content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not available${failedAgo === null ? "" : ` (failed ${failedAgo}s ago)`}` }],
+        content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not available${failure !== null ? ` (${failure})` : ""}` }],
         details: { error: "server_unavailable", server: spec.serverName },
       };
     }
@@ -303,7 +305,8 @@ export function createDirectToolExecutor(
           })
         : null;
 
-      let result = await withSessionRecovery<ClientCallToolResult>(
+      const requestMeta = withToolCallIdMeta(uiSession?.requestMeta, toolCallId);
+      const result = await withSessionRecovery<ClientCallToolResult>(
         {
           manager: state.manager,
           config: state.config,
@@ -317,7 +320,7 @@ export function createDirectToolExecutor(
             return await callToolViaTaskSession(conn.taskSession, {
               name: spec.originalName,
               args: normalizedParams ?? {},
-              meta: uiSession?.requestMeta,
+              meta: requestMeta,
               signal: ownedSignal,
               requestTimeoutMs: requestOptions?.timeout,
             }) as unknown as ClientCallToolResult;
@@ -325,7 +328,7 @@ export function createDirectToolExecutor(
           return abortable(conn.client.callTool({
             name: spec.originalName,
             arguments: normalizedParams,
-            _meta: uiSession?.requestMeta,
+            _meta: requestMeta,
           }, requestOptions), ownedSignal);
         },
       );
