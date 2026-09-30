@@ -1,0 +1,23 @@
+{
+  "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+  "resource": "https://trebby.lan/broker/mcp",
+  "device_authorization": {
+    "device_code": "synthetic-device-secret-not-a-real-grant",
+    "user_code": "ABCD-2345",
+    "verification_uri": "https://trebby.lan/broker/activate",
+    "expires_in": 600,
+    "interval": 5
+  },
+  "errors": {
+    "pending": {"error": "authorization_pending", "error_description": "Awaiting human consent"},
+    "slow": {"error": "slow_down", "error_description": "Increase the polling interval by five seconds"},
+    "denied": {"error": "access_denied", "error_description": "User denied the request"},
+    "expired": {"error": "expired_token", "error_description": "Pairing request expired; restart pairing"}
+  },
+  "success": {
+    "access_token": "synthetic-access-token",
+    "token_type": "Bearer",
+    "refresh_token": "synthetic-refresh-token",
+    "scope": "profile:coding"
+  }
+}

@@ -135,6 +135,7 @@ describe("authenticateServer", () => {
         definition,
         {
           onAuthorizationUrl: expect.any(Function),
+          onDeviceAuthorization: expect.any(Function),
           onAuthorizationInput: expect.any(Function),
         },
       );
@@ -256,6 +257,7 @@ describe("authenticateServer", () => {
       { url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
       {
         onAuthorizationUrl: expect.any(Function),
+        onDeviceAuthorization: expect.any(Function),
         onAuthorizationInput: expect.any(Function),
       },
     );
@@ -268,6 +270,46 @@ describe("authenticateServer", () => {
       undefined,
       { signal: inputController.signal },
     );
+  });
+
+  it("renders short pairing details at 40 columns and cancels without a callback URL", async () => {
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const uri = "https://trebby.lan/broker/activate";
+    mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
+      options.onDeviceAuthorization({ verificationUri: uri, userCode: "ABCD-2345" }, controller.signal, cancel);
+      await Promise.resolve();
+      expect(cancel).toHaveBeenCalledOnce();
+      return "authenticated";
+    });
+    const ui = { notify: vi.fn(), setStatus: vi.fn(), input: vi.fn(async () => undefined) };
+    const { authenticateServer } = await import("../commands.ts");
+    await authenticateServer("broker", {
+      mcpServers: { broker: { url: "https://trebby.lan/broker/mcp", oauth: { grantType: "device_code" } } },
+    }, { hasUI: true, mode: "tui", ui } as any);
+    const prompt = ui.input.mock.calls[0]![0] as string;
+    expect(prompt).toContain(uri);
+    expect(prompt).toContain("Code: ABCD-2345");
+    expect(prompt.split("\n").every(line => line.length <= 40)).toBe(true);
+    expect(prompt).not.toMatch(/device_code|synthetic-device|access_token|localhost/);
+    expect(ui.input).toHaveBeenCalledWith(prompt, undefined, { signal: controller.signal });
+  });
+
+  it("does not cancel pairing when completion dismisses its prompt", async () => {
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const ui = { notify: vi.fn(), setStatus: vi.fn(), input: vi.fn(() => new Promise<void>(resolve => {
+      controller.signal.addEventListener("abort", () => resolve(), { once: true });
+    })) };
+    mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
+      options.onDeviceAuthorization({ verificationUri: "https://trebby.lan/broker/activate", userCode: "ABCD-2345" }, controller.signal, cancel);
+      controller.abort();
+      await Promise.resolve();
+      expect(cancel).not.toHaveBeenCalled();
+      return "authenticated";
+    });
+    const { authenticateServer } = await import("../commands.ts");
+    await authenticateServer("broker", { mcpServers: { broker: { url: "https://trebby.lan/broker/mcp" } } }, { hasUI: true, mode: "tui", ui } as any);
   });
 
   it("passes session-scoped storage through manual authentication", async () => {

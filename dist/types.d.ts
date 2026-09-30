@@ -236,7 +236,7 @@ export interface McpContent {
 export type ContentBlock = TextContent | ImageContent;
 export interface OAuthConfig {
     /** OAuth grant type (defaults to authorization_code) */
-    grantType?: "authorization_code" | "client_credentials";
+    grantType?: "authorization_code" | "client_credentials" | "device_code";
     /** Pre-registered client ID (optional, dynamic registration used if not provided) */
     clientId?: string;
     /** Client secret for confidential clients; requires an explicit clientId when clientMetadataUrl is set. */

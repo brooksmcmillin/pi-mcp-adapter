@@ -48,6 +48,7 @@ import { createOAuthFetch, oauthHeaderResolver, resolveOAuthHeaders } from "./mc
 import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts"
 import { abortable, throwIfAborted } from "./abort.ts"
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts"
+import { authenticateDevice, type DeviceAuthOptions } from "./mcp-device-auth.ts"
 
 /** Auth status for a server */
 export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
@@ -57,6 +58,7 @@ export interface McpOAuthRuntime {
 }
 
 export interface AuthenticateOptions {
+  onDeviceAuthorization?: DeviceAuthOptions["onDeviceAuthorization"]
   onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
   openAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
   onAuthorizationInput?: (
@@ -108,6 +110,7 @@ type RuntimeState = {
   pendingAuthStates: Map<string, string>
   pendingAuthCleanupTimers: Map<string, ReturnType<typeof setTimeout>>
   pendingAuthentications: Map<string, PendingAuthentication>
+  deviceAuths: Map<string, { serverName: string; controller: AbortController; authority: OAuthAuthority }>
 }
 
 const runtimeStates = new WeakMap<McpOAuthRuntime, RuntimeState>()
@@ -123,6 +126,7 @@ export function createOAuthRuntime(signal?: AbortSignal): McpOAuthRuntime {
     pendingAuthStates: new Map(),
     pendingAuthCleanupTimers: new Map(),
     pendingAuthentications: new Map(),
+    deviceAuths: new Map(),
   })
   activeRuntimes.add(runtime)
   return runtime
@@ -164,9 +168,10 @@ function hasOAuthAuthority(authority: OAuthAuthority): boolean {
 export function hasPendingAuth(serverName: string, options?: AuthStorageOptions, runtime?: McpOAuthRuntime): boolean {
   const state = getRuntimeState(runtime ?? legacyRuntime)
   if (options) {
-    return state.pendingAuths.has(getPendingAuthKey(serverName, options))
+    const key = getPendingAuthKey(serverName, options)
+    return state.pendingAuths.has(key) || state.deviceAuths.has(key)
   }
-  return Array.from(state.pendingAuths.values()).some(pendingAuth => pendingAuth.serverName === serverName)
+  return [...state.pendingAuths.values(), ...state.deviceAuths.values()].some(pendingAuth => pendingAuth.serverName === serverName)
 }
 
 /** Timeout for manual auth completion (5 minutes) */
@@ -459,6 +464,40 @@ export async function startAuth(
   const generation = runtimeState.generation
   throwIfAborted(signal)
 
+  if (config.grantType === "device_code") {
+    const key = getPendingAuthKey(serverName, authStorageOptions)
+    runtimeState.deviceAuths.get(key)?.controller.abort(new Error("Device OAuth pairing replaced"))
+    const controller = new AbortController()
+    const deviceSignal = combineAbortSignals(signal, controller.signal)!
+    const pending = { serverName, controller, authority }
+    runtimeState.deviceAuths.set(key, pending)
+    const provider = new McpOAuthProvider(serverName, serverUrl, config, {
+      onRedirect: () => { throw new Error("Device OAuth does not use redirects") },
+    }, authStorageOptions, deviceSignal, undefined, authority)
+    try {
+      const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, signal: deviceSignal })
+      authority()
+      throwIfAborted(deviceSignal)
+      if (existing) return { authorizationUrl: "" }
+      const fetchFn = createOAuthFetch(serverUrl, pluginAwareOAuthHeaders(definition), deviceSignal)
+      provider.setAuthFetch(fetchFn)
+      const discovery = applyOAuthConfig(await probeAuthDiscovery(serverUrl, definition, deviceSignal), config)
+      const authorized = await authenticateDevice(provider, serverUrl, fetchFn, {
+        discovery, signal: deviceSignal, authority,
+        ...(options.onDeviceAuthorization ? { onDeviceAuthorization: options.onDeviceAuthorization } : {}),
+      })
+      authority()
+      throwIfAborted(deviceSignal)
+      if (authorized) return { authorizationUrl: "" }
+      // Only absent advertised support permits the ordinary PKCE fallback.
+      config.grantType = "authorization_code"
+    } finally {
+      provider.deactivate()
+      controller.abort(new Error("Device OAuth pairing finished"))
+      if (runtimeState.deviceAuths.get(key) === pending) runtimeState.deviceAuths.delete(key)
+    }
+  }
+
   if (config.grantType === "client_credentials") {
     const storedAuth = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
     authority()
@@ -721,6 +760,11 @@ async function cleanupAndReleaseCallbackServerIfIdle(cleanup: () => void | Promi
 function detachPendingAuthsForServer(serverName: string, reason: Error): void {
   for (const runtime of activeRuntimes) {
     const state = getRuntimeState(runtime)
+    for (const [key, pending] of state.deviceAuths) {
+      if (pending.serverName !== serverName || hasOAuthAuthority(pending.authority)) continue
+      pending.controller.abort(reason)
+      state.deviceAuths.delete(key)
+    }
     for (const [key, pendingAuth] of state.pendingAuths) {
       if (pendingAuth.serverName !== serverName || hasOAuthAuthority(pendingAuth.authority)) continue
       if (state.pendingAuths.get(key) !== pendingAuth) continue
@@ -1282,6 +1326,7 @@ export async function shutdownOAuth(runtime: McpOAuthRuntime = legacyRuntime): P
     await clearPendingAuth(runtime, pendingAuth.serverName, undefined, pendingAuth.authStorageOptions)
   }
   state.pendingAuthentications.clear()
+  state.deviceAuths.clear()
   activeRuntimes.delete(runtime)
 
   if (activeRuntimes.size === 0) {
