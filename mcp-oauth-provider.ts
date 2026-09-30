@@ -129,7 +129,7 @@ export function setOAuthCallbackPath(path: string): void {
 
 /** Configuration options for OAuth */
 export interface McpOAuthConfig {
-  grantType?: "authorization_code" | "client_credentials"
+  grantType?: "authorization_code" | "client_credentials" | "device_code"
   clientId?: string
   clientSecret?: string
   clientMetadataUrl?: string
@@ -288,6 +288,8 @@ export class McpOAuthProvider implements OAuthClientProvider {
     }
     this.authFetch = createOAuthFetch(serverUrl, undefined, runtimeSignal)
     this.flowState = initialState
+    // The SDK uses redirectUrl presence to select refresh rather than a new
+    // non-interactive token request. Device pairing never binds this callback.
     this.redirectUrlSnapshot = config.grantType === "client_credentials"
       ? undefined
       : config.redirectUri ?? `http://${DEFAULT_OAUTH_CALLBACK_HOST}:${getOAuthCallbackPort()}${getOAuthCallbackPath()}`
@@ -361,6 +363,15 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * Describes this client to the OAuth authorization server.
    */
   get clientMetadata(): OAuthClientMetadata {
+    if (this.config.grantType === "device_code") {
+      return {
+        client_name: this.config.clientName ?? defaultClientName(),
+        ...(this.clientUri === undefined ? {} : { client_uri: this.clientUri }),
+        redirect_uris: [],
+        grant_types: ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+        token_endpoint_auth_method: this.config.clientSecret ? "client_secret_post" : "none",
+      }
+    }
     if (this.usesClientCredentials) {
       return {
         client_name: this.config.clientName ?? defaultClientName(),

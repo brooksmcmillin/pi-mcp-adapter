@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.ts";
+import { readFileSync } from "node:fs";
+import { authenticate, createOAuthRuntime, shutdownOAuth } from "../mcp-auth-flow.ts";
+import * as callbacks from "../mcp-callback-server.ts";
 import * as auth from "../mcp-auth.ts";
 import { beginOAuthRevocation, getAuthStorageOptions, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
 
@@ -105,6 +108,56 @@ describe("McpServerManager.reconnect", () => {
 
     expect(fresh.status).toBe("connected");
     expect(mocks.httpTransports.at(-1)!.options.authProvider).toBeDefined();
+  });
+
+  it("reconnects after device pairing without another grant or callback listener", async () => {
+    const fixture = JSON.parse(readFileSync(new URL("./fixtures/broker-device-flow.json", import.meta.url), "utf8"));
+    const origin = "https://trebby.lan";
+    const issuer = `${origin}/broker`;
+    const storage = getAuthStorageOptions(undefined, process.cwd(), "session");
+    const runtime = createOAuthRuntime();
+    const listener = vi.spyOn(callbacks, "ensureCallbackServer");
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      let payload: unknown;
+      if (path === "/broker/mcp") return new Response("", { status: 401 });
+      if (path.includes("oauth-authorization-server")) payload = {
+        issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
+        device_authorization_endpoint: `${issuer}/device_authorization`,
+        response_types_supported: ["code"], grant_types_supported: [fixture.grant_type, "refresh_token"],
+        token_endpoint_auth_methods_supported: ["none"],
+      };
+      else if (path === "/broker/device_authorization") payload = { ...fixture.device_authorization, interval: 1 };
+      else if (path === "/broker/token") {
+        expect(new URLSearchParams(String(init?.body)).get("grant_type")).toBe(fixture.grant_type);
+        payload = fixture.success;
+      } else throw new Error("Unexpected synthetic device endpoint");
+      return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const { McpServerManager } = await import("../server-manager.ts");
+    const manager = new McpServerManager();
+    manager.setAuthStorageOptions(storage);
+    const deviceDef = {
+      url: fixture.resource as string, auth: "oauth" as const,
+      oauth: { grantType: "device_code" as const, clientId: "device-reconnect-client", authServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server/broker` },
+    };
+    try {
+      await authenticate("device-reconnect", fixture.resource, deviceDef, { runtime, authStorageOptions: storage, onDeviceAuthorization: () => {} });
+      const pairingRequests = fetch.mock.calls.length;
+      const stale = await manager.connect("device-reconnect", deviceDef);
+      const fresh = await manager.reconnect("device-reconnect", deviceDef, stale);
+      expect(fresh.status).toBe("connected");
+      const provider = mocks.httpTransports.at(-1)!.options.authProvider;
+      expect(await provider?.tokens?.()).toMatchObject({ access_token: fixture.success.access_token, refresh_token: fixture.success.refresh_token });
+      expect(fetch).toHaveBeenCalledTimes(pairingRequests);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      await manager.closeAll();
+      await shutdownOAuth(runtime);
+      listener.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("reconnects implicit OAuth servers with stored tokens", async () => {

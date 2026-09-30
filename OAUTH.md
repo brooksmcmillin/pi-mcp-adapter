@@ -76,7 +76,7 @@ You can optionally provide a pre-registered client:
 - `settings.oauthPersistence` - `"persistent"` (default) stores credentials in the operating-system credential store. `"session"` keeps credentials in memory for one adapter session, requiring independent authorization for concurrent Pi sessions and discarding credentials on session replacement or process exit.
 - `url` - The MCP server URL (required)
 - `auth` - Set to `"oauth"` to force OAuth, `false` to disable, or omit to auto-detect
-- `oauth.grantType` - `"authorization_code"` (default, browser flow) or `"client_credentials"` (non-interactive)
+- `oauth.grantType` - `"authorization_code"` (default, browser flow), `"client_credentials"` (non-interactive), or `"device_code"` (opt-in RFC 8628 pairing when advertised, otherwise authorization-code fallback)
 - `oauth.clientId` - Pre-registered client ID. Takes precedence over `oauth.clientMetadataUrl` when both are configured.
 - `oauth.clientSecret` - Client secret for confidential clients (optional). When `oauth.clientMetadataUrl` is also set, an explicit `oauth.clientId` is required; the explicit client takes precedence.
 - `oauth.clientMetadataUrl` - Advanced opt-in for an operator-supplied public HTTPS Client ID Metadata Document URL with a non-root path. The URL is used as `client_id` when the authorization server advertises `client_id_metadata_document_supported: true`; otherwise Dynamic Client Registration remains the fallback. The document must be publicly fetchable and match this client's metadata, especially `redirect_uris`. The adapter does not provide a default URL or host this document.
@@ -89,6 +89,59 @@ You can optionally provide a pre-registered client:
 - `oauth.skipIssuerMetadataValidation` - Set `true` only for a known-misconfigured authorization server whose metadata issuer cannot be fixed immediately. This weakens OAuth issuer validation.
 
 Dynamic fallback clients normally omit `oauth.redirectUri`; the adapter starts the callback server lazily on the default loopback host (`127.0.0.1`, as RFC 8252 recommends) and asks the OS for an available local port when auth begins. Use `oauth.redirectUri` when the provider requires a pre-registered callback, such as Slack MCP's Claude-compatible `http://localhost:3118/callback`, or when a server only accepts a `localhost` redirect (for example `http://localhost:{port}/callback`). A loopback URI must use `http://` with `localhost`, `127.0.0.1`, or `[::1]`. It may contain an explicit port, which is bound exactly, or `{port}`, which is replaced with the OS-assigned port in the authorization and token requests.
+
+### SSH-friendly `device_code` pairing
+
+For a broker that advertises RFC 8628 support, configure:
+
+```json
+{
+  "mcpServers": {
+    "broker": {
+      "url": "https://trebby.lan/broker/mcp",
+      "auth": "oauth",
+      "oauth": { "grantType": "device_code" }
+    }
+  },
+  "settings": { "oauthPersistence": "session" }
+}
+```
+
+Run `/mcp-auth broker`. The prompt shows the short activation URL on its own
+line and `Code: XXXX-XXXX`; enter that code in a browser on your local machine,
+then approve there. Polling connects automatically after approval. Escape
+cancels pairing. No callback listener, callback URL paste, SSH forwarding, or
+browser launch on the remote machine is needed. The broker's example URL/code
+prompt fits a 40-column terminal. Browser profile selection and TOTP remain
+broker-owned; the short code is not authentication.
+
+This is the launcher configuration contract: `oauth.grantType: "device_code"`
+opts into discovery of `device_authorization_endpoint` plus
+`urn:ietf:params:oauth:grant-type:device_code` in `grant_types_supported`.
+Existing URL-only servers keep authorization-code behavior. Missing advertised
+device support permits PKCE fallback; denial, expiry, invalid responses, and
+other device-flow failures stop instead of silently choosing another grant.
+Restart `/mcp-auth` for a new pairing. Default device clients register device
+and refresh grants without redirect URIs; an explicit `oauth.clientId` is also
+supported. `oauth.scope` and the validated resource binding apply;
+`authorizationParams` and `redirectUri` apply only to browser fallback.
+
+Polling honors the server's interval (five seconds when omitted), adds five
+seconds cumulatively on `slow_down`, and stops at the advertised expiry or a
+30-minute local maximum. Cancellation, logout, runtime shutdown, and replacement
+of an in-flight pairing prevent late token storage. Only the activation URL and
+user code reach the prompt: device codes stay flow-local and are discarded;
+tokens use the existing credential store and SDK refresh/reconnect protections.
+`oauthPersistence: "session"` retains independent grants for concurrent default
+Pi sessions; device support does not change the persistent-storage default.
+
+Use an adapter build containing this option; release/install and broker rollout
+are separate operations. Node must trust the broker's HTTPS CA (for example via
+`NODE_EXTRA_CA_CERTS` set before Pi starts); never disable TLS verification.
+The existing `auth-start`/`auth-complete` callback-URL instructions below describe
+authorization-code servers; use `/mcp-auth` for interactive short-code pairing.
+Contract tests consume a byte-identical synthetic broker fixture from
+`infra@a391ecb38f73f1997917beb080065587b95156c5:scripts/tests/fixtures/broker-device-flow.json`.
 
 ### Non-Interactive `client_credentials`
 
@@ -269,11 +322,11 @@ The stored `serverUrl` field ensures credentials are invalidated if the server U
 
 ### PKCE
 
-All OAuth flows use PKCE with the S256 method, preventing authorization code interception attacks.
+Authorization-code flows use PKCE with the S256 method, preventing authorization code interception attacks. RFC 8628 device grants do not use PKCE; their high-entropy device code stays private to the polling client.
 
 ### State Parameter
 
-A cryptographically secure random state parameter is generated for each flow and validated on callback.
+A cryptographically secure random state parameter is generated for each authorization-code flow and validated on callback. Device pairing has no callback; browser consent protections belong to the authorization server.
 
 ### Issuer Metadata Validation
 
@@ -340,6 +393,7 @@ The OAuth implementation uses the following modules:
 - `mcp-oauth-provider.ts` - SDK OAuthClientProvider implementation
 - `mcp-callback-server.ts` - Node.js HTTP callback server
 - `mcp-auth-flow.ts` - High-level auth flow using SDK transport
+- `mcp-device-auth.ts` - RFC 8628 device initiation and bounded, cancellable polling
 
 ## SDK Integration
 

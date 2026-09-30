@@ -421,6 +421,15 @@ export async function authenticateServer(
     const status = await authenticate(serverName, serverUrl, definition, {
       ...(Object.keys(authStorageOptions).length > 0 ? { authStorageOptions } : {}),
       onAuthorizationUrl: () => {},
+      onDeviceAuthorization: ({ verificationUri, userCode }, pairingSignal, cancel) => {
+        if (pairingSignal.aborted) return;
+        void ui.input(
+          `Pair ${serverName}\n\nOpen:\n${verificationUri}\n\nCode: ${userCode}\n\n` +
+            "Approve in your browser.\nWaiting for approval...\nEscape cancels. No callback URL needed.",
+          undefined,
+          { signal: pairingSignal },
+        ).then(() => { if (!pairingSignal.aborted) cancel(); }, cancel);
+      },
       onAuthorizationInput: async (authorizationUrl, inputSignal) => {
         if (inputSignal.aborted) return undefined;
         return ui.input(
