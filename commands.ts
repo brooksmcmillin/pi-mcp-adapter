@@ -371,7 +371,7 @@ export async function reconnectServers(
 export async function authenticateServer(
   serverName: string,
   config: McpConfig,
-  ctx: ExtensionContext,
+  ctx: Pick<ExtensionContext, "hasUI" | "ui" | "cwd" | "signal">,
   signal?: AbortSignal,
   runtime?: McpOAuthRuntime,
   sharedAuthStorageOptions?: AuthStorageOptions,

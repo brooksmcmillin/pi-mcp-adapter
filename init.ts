@@ -147,7 +147,9 @@ export async function initializeMcp(
     : options.excludeProjectServers
       ? { config: excludeProjectServersAtLoadTime(loadMcpConfig(configPath, cwd)), blockedServers: new Map() }
       : await applyProjectServerTrustToConfig(loadMcpConfig(configPath, cwd), ctx);
-  options.onProjectTrustResolved?.();
+  const startupAutoAuth = trustResult.config.settings?.autoAuth === true && hasUI && mode === "tui";
+  // Keep session_start waiting while pairing owns the editor, just as for trust dialogs.
+  if (!startupAutoAuth) options.onProjectTrustResolved?.();
   const config = trustResult.config;
   const authStorageOptions = getAuthStorageOptions(
     config.settings?.oauthDir,
@@ -381,6 +383,37 @@ export async function initializeMcp(
 
   if (initialSignal?.aborted) return state;
   owner.throwIfInactive();
+
+  // Pair sequentially: concurrent eager connections must not stack UI dialogs.
+  if (startupAutoAuth) {
+    const { authenticateServer } = await import("./commands.ts");
+    for (const result of results) {
+      owner.throwIfInactive();
+      throwIfAborted(runtimeSignal);
+      if (manager.getConnection(result.name)?.status !== "needs-auth") continue;
+      const auth = await authenticateServer(
+        result.name, config, { hasUI, ui: ui!, cwd, signal: runtimeSignal },
+        runtimeSignal, oauthRuntime, authStorageOptions,
+      );
+      owner.throwIfInactive();
+      throwIfAborted(runtimeSignal);
+      if (!auth.ok) continue;
+      try {
+        await manager.close(result.name);
+        const connection = await manager.connect(result.name, result.definition, runtimeSignal);
+        if (connection.status !== "needs-auth") {
+          result.connection = connection;
+          result.error = null;
+        }
+      } catch (error) {
+        if (isAbortError(error, runtimeSignal)) throw error;
+        result.error = error instanceof Error ? error.message : String(error);
+        result.transient = isTransientHttpConnectError(error);
+      }
+    }
+  }
+
+  if (startupAutoAuth) options.onProjectTrustResolved?.();
 
   const startupKnownMetadata = new Map<string, ToolMetadata[]>();
   for (const { name, definition, connection } of results) {
