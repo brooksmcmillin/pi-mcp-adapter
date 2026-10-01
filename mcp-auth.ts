@@ -133,11 +133,11 @@ export interface AuthEntry {
 export interface AuthStorageOptions {
   /** Legacy plaintext import directory. Persistent secrets no longer use this as their store. */
   baseDir?: string;
-  /** Keep credentials in this adapter session only instead of the operating-system credential store. */
+  /** Keep credentials in host-session memory instead of the operating-system credential store. */
   persistence?: 'session';
   /** Internal identity used to isolate concurrent OAuth flows for session storage. */
   sessionId?: string;
-  /** Internal process-memory credential store owned by one adapter session. */
+  /** Internal process-memory credential store, retained across reload for the same host. */
   sessionEntries?: Map<string, string>;
   credentialStore?: 'encrypted-file';
 }
@@ -648,11 +648,19 @@ export function loadTestKeyringEntryClass(keyringRequire: KeyringRequire, platfo
   return loadKeyringEntryClass(keyringRequire, platform, arch);
 }
 
+// Pi reloads modules as well as extensions. A weak host key preserves completed
+// credentials without keeping a disposed SDK session or extension runtime alive.
+const SESSION_AUTH_STORES = Symbol.for('pi-mcp-adapter.session-auth-stores.v1');
+const sessionAuthRegistry = globalThis as typeof globalThis & {
+  [SESSION_AUTH_STORES]?: WeakMap<object, Map<string, AuthStorageOptions>>;
+};
+
 export function getAuthStorageOptions(
   oauthDir: unknown,
   cwd = process.cwd(),
   persistence: unknown = undefined,
   oauthCredentialStore: unknown = undefined,
+  sessionOwner?: object,
 ): AuthStorageOptions {
   if (persistence !== undefined && persistence !== 'persistent' && persistence !== 'session') {
     throw new Error('settings.oauthPersistence must be "persistent" or "session"');
@@ -665,12 +673,26 @@ export function getAuthStorageOptions(
   }
   const baseDir = resolveConfiguredOAuthDir(oauthDir, cwd);
   if (persistence === 'session') {
-    return {
+    let stores: Map<string, AuthStorageOptions> | undefined;
+    const namespace = getAuthBaseDir(baseDir ? { baseDir } : {});
+    if (sessionOwner) {
+      const registry = sessionAuthRegistry[SESSION_AUTH_STORES] ??= new WeakMap();
+      stores = registry.get(sessionOwner);
+      if (!stores) {
+        stores = new Map();
+        registry.set(sessionOwner, stores);
+      }
+      const existing = stores.get(namespace);
+      if (existing) return existing;
+    }
+    const options: AuthStorageOptions = {
       ...(baseDir ? { baseDir } : {}),
       persistence: 'session',
       sessionId: randomUUID(),
       sessionEntries: new Map<string, string>(),
     };
+    stores?.set(namespace, options);
+    return options;
   }
   return baseDir ? { baseDir } : {};
 }

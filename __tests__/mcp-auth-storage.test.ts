@@ -362,6 +362,43 @@ describe("mcp-auth storage paths", () => {
     expect(getAuthEntry("same-server")?.tokens?.accessToken).toBe("persistent-token");
   });
 
+  it("retains host credentials without crossing server, URL, or host boundaries", () => {
+    const host = {};
+    const url = "https://example.com/mcp";
+    const storage = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, host);
+    saveAuthEntry("broker-original", {
+      tokens: { accessToken: "host-token", refreshToken: "host-refresh" },
+      clientInfo: { clientId: "host-client" },
+    }, url, storage);
+
+    const reloaded = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, host);
+    expect(reloaded).toBe(storage);
+    expect(getAuthForUrl("broker-original", url, reloaded)).toMatchObject({
+      tokens: { accessToken: "host-token", refreshToken: "host-refresh" },
+      clientInfo: { clientId: "host-client" },
+    });
+    expect(getAuthForUrl("broker-original", "https://other.example.com/mcp", reloaded)).toBeUndefined();
+    expect(getAuthForUrl("broker-new", url, reloaded)).toBeUndefined();
+    const otherHost = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {});
+    expect(getAuthForUrl("broker-original", url, otherHost)).toBeUndefined();
+    expect(getTestAuthSecretStoreEntries()).toHaveLength(0);
+
+    clearAllCredentials("broker-original", reloaded);
+    const afterLogout = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, host);
+    expect(getAuthForUrl("broker-original", url, afterLogout)).toBeUndefined();
+  });
+
+  it("isolates host storage when the configured OAuth namespace changes", () => {
+    delete process.env.MCP_OAUTH_DIR;
+    const host = {};
+    const first = getAuthStorageOptions(".pi/oauth-a", process.cwd(), "session", undefined, host);
+    const second = getAuthStorageOptions(".pi/oauth-b", process.cwd(), "session", undefined, host);
+    expect(getAuthStorageIdentity(first)).not.toBe(getAuthStorageIdentity(second));
+    saveAuthEntry("broker", { tokens: { accessToken: "namespace-token" } }, "https://example.com/mcp", first);
+    expect(getAuthEntry("broker", second)).toBeUndefined();
+    expect(getAuthStorageOptions(".pi/oauth-a", process.cwd(), "session", undefined, host)).toBe(first);
+  });
+
   it("does not inspect or migrate legacy credentials in session mode", () => {
     const filePath = getAuthEntryFilePath("session-legacy");
     mkdirSync(dirname(filePath), { recursive: true });

@@ -154,6 +154,7 @@ export async function initializeMcp(
     cwd,
     config.settings?.oauthPersistence,
     config.settings?.oauthCredentialStore,
+    sessionManager,
   );
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;
