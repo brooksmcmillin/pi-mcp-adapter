@@ -1040,6 +1040,41 @@ describe("mcp-auth-flow explicit auth", () => {
     await shutdownOAuth(runtimeB);
   });
 
+  it("cancels old pending flows while retaining completed host credentials for reload", async () => {
+    let staleProvider: { saveTokens: (tokens: { access_token: string; token_type: string }) => Promise<void> } | undefined;
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      staleProvider = provider;
+      await provider.redirectToAuthorization(new URL("https://auth.example.com/pending"));
+      return "REDIRECT";
+    });
+    const { createOAuthRuntime, hasPendingAuth, removeAuth, shutdownOAuth, startAuth } = await import("../mcp-auth-flow.ts");
+    const { getAuthForUrl, getAuthStorageOptions, saveAuthEntry } = await import("../mcp-auth.ts");
+    const host = {};
+    const storage = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, host);
+    const url = "https://api.example.com/mcp";
+    saveAuthEntry("completed-host", { tokens: { accessToken: "completed-token" } }, url, storage);
+    const oldRuntime = createOAuthRuntime();
+    const newRuntime = createOAuthRuntime();
+    try {
+      await startAuth("pending-host", url, { url, auth: "oauth" }, {
+        runtime: oldRuntime, authStorageOptions: storage,
+      });
+      expect(hasPendingAuth("pending-host", storage, oldRuntime)).toBe(true);
+      await shutdownOAuth(oldRuntime);
+      expect(hasPendingAuth("pending-host", storage, oldRuntime)).toBe(false);
+      await expect(staleProvider!.saveTokens({ access_token: "stale-token", token_type: "Bearer" }))
+        .rejects.toThrow();
+      const reloaded = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, host);
+      expect(getAuthForUrl("pending-host", url, reloaded)?.tokens).toBeUndefined();
+      expect(getAuthForUrl("completed-host", url, reloaded)?.tokens?.accessToken).toBe("completed-token");
+      await removeAuth("completed-host", { runtime: newRuntime, authStorageOptions: reloaded });
+      expect(getAuthForUrl("completed-host", url, reloaded)).toBeUndefined();
+    } finally {
+      await shutdownOAuth(oldRuntime);
+      await shutdownOAuth(newRuntime);
+    }
+  });
+
   it("does not revoke another session's pending authorization when logging out", async () => {
     mocks.sdkAuth
       .mockImplementationOnce(async (provider) => {
