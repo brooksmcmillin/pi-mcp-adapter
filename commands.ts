@@ -423,8 +423,11 @@ export async function authenticateServer(
       onAuthorizationUrl: () => {},
       onDeviceAuthorization: ({ verificationUri, userCode }, pairingSignal, cancel) => {
         if (pairingSignal.aborted) return;
+        const activationUrl = new URL(verificationUri);
+        activationUrl.searchParams.set("user_code", userCode);
+        const link = terminalHyperlink(activationUrl.href, activationUrl.href);
         void ui.input(
-          `Pair ${serverName}\n\nOpen:\n${verificationUri}\n\nCode: ${userCode}\n\n` +
+          `Pair ${serverName}\n\nOpen:\n${link}\n\nCode: ${userCode}\n\n` +
             "Approve in your browser.\nWaiting for approval...\nEscape cancels. No callback URL needed.",
           undefined,
           { signal: pairingSignal },

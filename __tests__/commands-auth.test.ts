@@ -272,10 +272,12 @@ describe("authenticateServer", () => {
     );
   });
 
-  it("renders short pairing details at 40 columns and cancels without a callback URL", async () => {
+  it.each([
+    ["https://trebby.lan/broker/activate", "https://trebby.lan/broker/activate?user_code=ABCD-2345"],
+    ["https://trebby.lan/broker/activate?source=pi&user_code=old", "https://trebby.lan/broker/activate?source=pi&user_code=ABCD-2345"],
+  ])("renders a clickable prefilled pairing link for %s and cancels without a callback URL", async (uri, activationUrl) => {
     const controller = new AbortController();
     const cancel = vi.fn();
-    const uri = "https://trebby.lan/broker/activate";
     mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
       options.onDeviceAuthorization({ verificationUri: uri, userCode: "ABCD-2345" }, controller.signal, cancel);
       await Promise.resolve();
@@ -288,9 +290,10 @@ describe("authenticateServer", () => {
       mcpServers: { broker: { url: "https://trebby.lan/broker/mcp", oauth: { grantType: "device_code" } } },
     }, { hasUI: true, mode: "tui", ui } as any);
     const prompt = ui.input.mock.calls[0]![0] as string;
-    expect(prompt).toContain(uri);
+    expect(prompt).toContain(
+      `\u001B]8;;${activationUrl}\u001B\\${activationUrl}\u001B]8;;\u001B\\`,
+    );
     expect(prompt).toContain("Code: ABCD-2345");
-    expect(prompt.split("\n").every(line => line.length <= 40)).toBe(true);
     expect(prompt).not.toMatch(/device_code|synthetic-device|access_token|localhost/);
     expect(ui.input).toHaveBeenCalledWith(prompt, undefined, { signal: controller.signal });
   });
