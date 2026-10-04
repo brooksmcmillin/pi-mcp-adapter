@@ -192,6 +192,27 @@ describe("MCP status snapshots", () => {
     }
   });
 
+  it("publishes only the connected broker's authenticated profile", () => {
+    const state = createState();
+    const info = { name: "mcp-broker", version: "1", description: "MCP broker profile: ui-coding" };
+    const connection = {
+      status: "connected", tools: [], resources: [],
+      client: { getServerVersion: () => info, credential: "do-not-publish" },
+    };
+    state.manager.getConnection.mockImplementation((name: string) => name === "connected" ? connection : undefined);
+    expect(createMcpStatusSnapshot(state).servers[0].brokerProfile).toBe("ui-coding");
+    expect(JSON.stringify(createMcpStatusSnapshot(state))).not.toContain("do-not-publish");
+
+    info.name = "other-server";
+    expect(createMcpStatusSnapshot(state).servers[0]).not.toHaveProperty("brokerProfile");
+    info.name = "mcp-broker";
+    info.description = "old broker without metadata";
+    expect(createMcpStatusSnapshot(state).servers[0]).not.toHaveProperty("brokerProfile");
+    info.description = "MCP broker profile: ui-coding";
+    connection.status = "closed";
+    expect(createMcpStatusSnapshot(state).servers[0]).not.toHaveProperty("brokerProfile");
+  });
+
   it("publishes an empty snapshot at shutdown", () => {
     const emit = vi.fn();
     publishMcpStatusShutdown({ emit });

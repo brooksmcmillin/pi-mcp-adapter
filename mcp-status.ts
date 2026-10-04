@@ -53,6 +53,11 @@ export function createMcpStatusSnapshot(state: McpExtensionState): McpStatusSnap
       status = "cached";
     }
 
+    const serverInfo = status === "connected" ? connection?.client?.getServerVersion?.() : undefined;
+    const brokerProfile = serverInfo?.name === "mcp-broker"
+      ? /^MCP broker profile: (.+)$/.exec(serverInfo.description ?? "")?.[1]
+      : undefined;
+
     totalTools += disabled ? 0 : toolCount;
     if (!disabled && resourceCount !== undefined) totalResources += resourceCount;
     servers.push({
@@ -66,6 +71,7 @@ export function createMcpStatusSnapshot(state: McpExtensionState): McpStatusSnap
       ...(status === "failed" && failedAgoSeconds !== null ? { failedAgoSeconds } : {}),
       disabled,
       ...(blockedReason ? { blockedReason } : {}),
+      ...(brokerProfile ? { brokerProfile } : {}),
     });
   }
 
