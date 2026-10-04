@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import {
   MCP_STATUS_EVENT,
   createMcpStatusSnapshot,
@@ -189,6 +190,29 @@ describe("MCP status snapshots", () => {
         status: server.status === "not-connected" ? "not connected" : server.status,
         toolCount: server.toolCount,
       });
+    }
+  });
+
+  it("preserves broker profile metadata through the SDK handshake", async () => {
+    const [clientTransport, brokerTransport] = InMemoryTransport.createLinkedPair();
+    brokerTransport.onmessage = async (message) => {
+      if ("method" in message && message.method === "initialize" && "id" in message) {
+        await brokerTransport.send({ jsonrpc: "2.0", id: message.id, result: {
+          protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } },
+          serverInfo: { name: "mcp-broker", version: "1", description: "MCP broker profile: coding" },
+        } });
+      }
+    };
+    const client = new Client({ name: "header-test", version: "1" }, { capabilities: {} });
+    try {
+      await client.connect(clientTransport);
+      const state = createState();
+      state.manager.getConnection.mockImplementation((name: string) => name === "connected"
+        ? { status: "connected", tools: [], resources: [], client } : undefined);
+      expect(createMcpStatusSnapshot(state).servers[0].brokerProfile).toBe("coding");
+    } finally {
+      await client.close();
+      await brokerTransport.close();
     }
   });
 
