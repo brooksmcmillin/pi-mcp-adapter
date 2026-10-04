@@ -49,6 +49,20 @@ describe("broker profile header", () => {
     expect(run.header?.render(100).join("")).not.toContain("NEVER_SHOW");
   });
 
+  it("clears a stale profile when a valid snapshot has no broker", () => {
+    const run = load(["--mcp-config=/tmp/mcp-broker-abc.json"]);
+    run.start();
+    for (const servers of [[], [{ name: "other", status: "connected" }]]) {
+      run.events.emit(channel, status("coding"));
+      const before = run.renders;
+      run.events.emit(channel, { version: 1, servers });
+      expect(run.header?.render(100)[0]).toBe("Pi · MCP broker profile: disconnected");
+      expect(run.renders).toBe(before + 1);
+    }
+    run.events.emit(channel, status("ui-coding"));
+    expect(run.header?.render(100)[0]).toContain("ui-coding");
+  });
+
   it("handles authentication, older brokers, reconnection, controls and disposal", () => {
     const run = load(["--mcp-config=/tmp/mcp-broker-abc.json"]);
     run.start();

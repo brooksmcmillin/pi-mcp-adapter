@@ -21,7 +21,11 @@ export default function (pi: ExtensionAPI) {
 		} | undefined;
 		if (snapshot?.version !== 1 || !Array.isArray(snapshot.servers)) return;
 		const broker = snapshot.servers.find((server) => server.name.startsWith("broker-"));
-		if (!broker) return;
+		if (!broker) {
+			label = "disconnected";
+			requestRender?.();
+			return;
+		}
 		label = broker.status === "connected"
 			? (broker.brokerProfile || "unavailable (broker update needed)")
 			: broker.status;
