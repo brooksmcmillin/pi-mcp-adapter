@@ -47,6 +47,8 @@ export interface McpServerStatusSnapshot {
   readonly listenState: McpListenState;
   readonly catalogStale?: boolean;
   readonly blockedReason?: string;
+  /** Authenticated broker profile reported by the latest handshake, never credentials. */
+  readonly brokerProfile?: string;
 }
 
 export interface McpStatusSnapshot {
