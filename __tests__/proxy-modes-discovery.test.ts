@@ -427,7 +427,7 @@ describe("proxy discovery", () => {
     });
     expect(callTool).toHaveBeenCalledWith(
       { name: "renew_task_claim", arguments: { task_id: "1", claim_token: "opaque-token" }, _meta: undefined },
-      undefined,
+      expect.objectContaining({ onprogress: expect.any(Function), resetTimeoutOnProgress: true }),
     );
   });
 
@@ -469,7 +469,7 @@ describe("proxy discovery", () => {
     expect(result.details).not.toMatchObject({ error: "tool_not_found" });
     expect(callTool).toHaveBeenCalledWith(
       { name: "codegraph_explore", arguments: { query: "identity provider" }, _meta: undefined },
-      undefined,
+      { onprogress: expect.any(Function), resetTimeoutOnProgress: true },
     );
   });
 
@@ -502,7 +502,7 @@ describe("proxy discovery", () => {
     });
     expect(callTool).toHaveBeenCalledWith(
       { name: "search", arguments: {}, _meta: undefined },
-      undefined,
+      { onprogress: expect.any(Function), resetTimeoutOnProgress: true },
     );
 
     expect(executeDescribe(state, "demo_search").details).toMatchObject({
@@ -585,7 +585,7 @@ describe("proxy discovery", () => {
       server: "other",
       tool: { originalName: "foo_bar" },
     });
-    expect(exactCall).toHaveBeenCalledWith({ name: "foo_bar", arguments: {}, _meta: undefined }, undefined);
+    expect(exactCall).toHaveBeenCalledWith({ name: "foo_bar", arguments: {}, _meta: undefined }, { onprogress: expect.any(Function), resetTimeoutOnProgress: true });
   });
 
   it("ignores lower-tier and unavailable ambiguities when describing an exact upstream owner", () => {

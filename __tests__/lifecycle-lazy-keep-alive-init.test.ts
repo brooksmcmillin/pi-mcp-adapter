@@ -1,10 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  cachePath: "",
   cache: null as { version: 1; servers: Record<string, unknown> } | null,
   config: { settings: {}, mcpServers: {} } as any,
   manager: undefined as any,
@@ -30,7 +29,6 @@ vi.mock("../metadata-cache.ts", async (importOriginal) => ({
   ...await importOriginal<typeof import("../metadata-cache.ts")>(),
   computeServerHash: vi.fn(() => "hash"),
   createCachedToolSelectorCandidateIndex: mocks.createCachedToolSelectorCandidateIndex,
-  getMetadataCachePath: vi.fn(() => mocks.cachePath),
   getMissingConfiguredDirectToolServers: mocks.getMissingConfiguredDirectToolServers,
   isServerCacheValid: mocks.isServerCacheValid,
   loadMetadataCache: vi.fn(() => mocks.cache),
@@ -96,6 +94,12 @@ function createManager() {
   return manager;
 }
 
+// Startup does not discover servers with private metadata, so the direct-tools bootstrap connects them.
+const privateCache = () => ({
+  version: 1 as const,
+  servers: { srv: { configHash: "hash", cachedAt: Date.now(), tools: [], resources: [], cacheScope: "private" } },
+});
+
 describe("lazy-keep-alive initializeMcp integration", () => {
   const originalDirectTools = process.env.MCP_DIRECT_TOOLS;
   let tempDir: string;
@@ -104,7 +108,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
     vi.resetModules();
     delete process.env.MCP_DIRECT_TOOLS;
     tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-lifecycle-init-"));
-    mocks.cachePath = join(tempDir, "mcp-cache.json");
     mocks.cache = { version: 1, servers: {} };
     mocks.config = {
       settings: {},
@@ -162,7 +165,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
 
   it("does not treat cached lazy metadata as successful startup metadata", async () => {
     mocks.isServerCacheValid.mockReturnValue(true);
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.cache = {
       version: 1,
       servers: {
@@ -205,7 +207,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("does not index cached candidates when filtered metadata is invalid", async () => {
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.cache = {
       version: 1,
       servers: {
@@ -245,15 +246,14 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it.each([
-    { scenario: "missing cache and no configured servers", disabled: false, cacheExists: false },
-    { scenario: "invalid cache and all configured servers disabled", disabled: true, cacheExists: true },
-  ])("initializes with $scenario without repairing an unwritable cache", async ({ disabled, cacheExists }) => {
+    { scenario: "missing cache and no configured servers", disabled: false },
+    { scenario: "invalid cache and all configured servers disabled", disabled: true },
+  ])("initializes with $scenario without repairing an unwritable cache", async ({ disabled }) => {
     mocks.cache = null;
     mocks.config = {
       settings: {},
       mcpServers: disabled ? { srv: { command: "demo", disabled: true } } : {},
     };
-    if (cacheExists) writeFileSync(mocks.cachePath, "invalid cache");
     mocks.saveMetadataCache.mockImplementation(() => { throw new Error("cache directory is unwritable"); });
     const { initializeMcp } = await import("../init.ts");
     const ui = { setStatus: vi.fn(), notify: vi.fn() };
@@ -345,8 +345,7 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("records direct-tool bootstrap failures", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+    mocks.cache = privateCache();
     mocks.config = {
       settings: {},
       mcpServers: { srv: { command: "demo", lifecycle: "lazy", directTools: true } },
@@ -366,15 +365,14 @@ describe("lazy-keep-alive initializeMcp integration", () => {
     expect(state.failureMessages.get("srv")).toBe("bootstrap failed");
   });
 
-  it("clears stale startup diagnostics when direct-tool bootstrap recovers", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+  it("does not retry a failed startup connection in the direct-tools bootstrap", async () => {
     mocks.config = {
       settings: {},
       mcpServers: { srv: { command: "demo", lifecycle: "keep-alive", directTools: true } },
     };
     mocks.getMissingConfiguredDirectToolServers.mockReturnValue(["srv"]);
     mocks.manager.connect.mockRejectedValueOnce(new Error("startup failed"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const { initializeMcp } = await import("../init.ts");
 
     const state = await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
@@ -384,14 +382,41 @@ describe("lazy-keep-alive initializeMcp integration", () => {
       signal: undefined,
     } as any);
 
-    expect(mocks.manager.connect).toHaveBeenCalledTimes(2);
-    expect(state.failureTracker.has("srv")).toBe(false);
-    expect(state.failureMessages.has("srv")).toBe(false);
+    expect(mocks.manager.connect).toHaveBeenCalledTimes(1);
+    expect(state.failureMessages.get("srv")).toBe("startup failed");
+  });
+
+  it("closes only plain lazy discovery connections and counts resident servers as connected", async () => {
+    mocks.config = {
+      settings: {},
+      mcpServers: {
+        plain: { command: "plain" },
+        resident: { command: "resident", lifecycle: "lazy-keep-alive" },
+        pinned: { command: "pinned", idleTimeout: 0 },
+        signin: { command: "signin" },
+      },
+    };
+    mocks.manager.connect.mockImplementation(async (name: string) => ({
+      status: name === "signin" ? "needs-auth" : "connected",
+      tools: [],
+      resources: [],
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { initializeMcp } = await import("../init.ts");
+    const ui = { setStatus: vi.fn(), notify: vi.fn() };
+
+    await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
+      cwd: tempDir,
+      hasUI: true,
+      mode: "tui",
+      ui,
+    } as any);
+
+    expect(mocks.manager.close.mock.calls).toEqual([["plain"]]);
+    expect(ui.notify).toHaveBeenCalledWith("MCP: 2 servers connected (0 tools)", "info");
   });
 
   it("sanitizes captured diagnostics in startup notifications and terminal logs", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.config = {
       settings: {},
       mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
@@ -415,8 +440,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("honors the status icon opt-out during eager startup", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.config = {
       settings: { showStatusIcon: false },
       mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
@@ -435,8 +458,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("suppresses successful startup notices when configured", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.config = {
       settings: { notifyOnStartupConnect: false },
       mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
@@ -455,8 +476,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("keeps startup notices enabled independently of the footer setting by default", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.config = {
       settings: { mcpFooterStatus: "off" },
       mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
@@ -476,8 +495,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("keeps startup connection failures visible when success notices are suppressed", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.config = {
       settings: { notifyOnStartupConnect: false },
       mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
@@ -499,8 +516,6 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("does not record or notify an aborted eager startup", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
     mocks.config = {
       settings: {},
       mcpServers: { srv: { command: "demo", lifecycle: "eager" } },
@@ -563,8 +578,7 @@ describe("lazy-keep-alive initializeMcp integration", () => {
   });
 
   it("marks direct-tool metadata bootstrap spawns for health-check reconnects", async () => {
-    mkdirSync(tempDir, { recursive: true });
-    writeFileSync(mocks.cachePath, JSON.stringify({ version: 1, servers: {} }));
+    mocks.cache = privateCache();
     mocks.getMissingConfiguredDirectToolServers.mockReturnValue(["srv"]);
     const { initializeMcp } = await import("../init.ts");
 

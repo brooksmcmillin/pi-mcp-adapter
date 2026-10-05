@@ -65,6 +65,11 @@ describe("formatToolName", () => {
 });
 
 describe("buildProxyDescription", () => {
+  it("points to mcpScript only when it is registered", () => {
+    expect(buildProxyDescription({ mcpServers: {} }, true)).toContain("Use mcpScript");
+    expect(buildProxyDescription({ mcpServers: {}, settings: { scriptMode: true } }, false)).not.toContain("mcpScript");
+  });
+
   it("documents the ui-messages action", () => {
     const config: McpConfig = {
       mcpServers: {
@@ -80,7 +85,6 @@ describe("buildProxyDescription", () => {
     expect(description).toContain('mcp({ action: "ui-messages" })');
     expect(description).toContain("Retrieve accumulated messages from completed UI sessions");
     expect(description).toContain("server status, tool search/describe, auth, and single MCP tool calls");
-    expect(description).toContain("When one request needs several MCP calls with logic between them, use mcpScript.");
     expect(description).toContain("Search MCP tools by name/description");
     expect(description).toContain("Non-MCP Pi tools should be called directly, not through mcp.");
     expect(description).not.toContain("MCP + pi");
@@ -626,10 +630,10 @@ describe("excludeTools filtering", () => {
 
   it("keeps cached metadata filtering scoped to current server identities", () => {
     const config: McpConfig = {
-      settings: { toolPrefix: "server" },
+      settings: { toolPrefix: "server", directTools: true },
       mcpServers: {
-        "my-server": { command: "hyphen", excludeTools: ["my_2d_server_do_thing"] },
         my_2d_server: { command: "escaped", excludeTools: ["my_2d_server_do_thing"] },
+        "my-server": { command: "hyphen", excludeTools: ["my_2d_server_do_thing"] },
       },
     };
     const cache: MetadataCache = {
@@ -644,6 +648,7 @@ describe("excludeTools filtering", () => {
 
     expect(reconstructToolMetadata("my-server", cache.servers["my-server"]!, "server", config.mcpServers["my-server"], config.mcpServers, cache).map(tool => tool.name)).toEqual(["my-server_do_thing"]);
     expect(reconstructToolMetadata("my_2d_server", cache.servers.my_2d_server!, "server", config.mcpServers.my_2d_server, config.mcpServers, cache)).toEqual([]);
+    expect(resolveDirectTools(config, cache, "server").map(tool => tool.prefixedName)).toEqual(["my-server_do_thing"]);
   });
 
   it("filters included tools from live and cached metadata before applying exclusions", () => {
@@ -1221,7 +1226,7 @@ describe("excludeTools filtering", () => {
     });
     expect(callTool).toHaveBeenCalledWith(
       { name: "renew_task_claim", arguments: { task_id: "1", claim_token: "opaque-token" }, _meta: { "pi-mcp-adapter/toolCallId": "call" } },
-      undefined,
+      expect.objectContaining({ onprogress: expect.any(Function), resetTimeoutOnProgress: true }),
     );
   });
 

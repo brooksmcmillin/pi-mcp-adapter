@@ -6,19 +6,30 @@ import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from 
 import { loadMcpScriptWasm, resolveMcpScriptQuickJsUrl } from "./mcp-script-wasm.ts";
 import { evaluateJev, validateJevSettings } from "./jev-client.ts";
 import type { JevErrorCode, JevEvaluateInput, JevEvaluationEnvelope } from "./jev-contracts.ts";
-import { executeCall } from "./proxy-modes.ts";
+import { executeCall, findTools, resolveDescribeTarget, unscopedCallReachesServer } from "./proxy-modes.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";
-import { paginate, rankSuggestions, rankToolMatches } from "./search-ranking.ts";
-import { semanticSearch, type SemanticSearchEvaluator } from "./semantic-search.ts";
-import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
+import { paginate } from "./search-ranking.ts";
+import type { SemanticSearchEvaluator } from "./semantic-search.ts";
 import type { McpExtensionState } from "./state.ts";
-import { findToolByName, formatSchema, hasSchemaDescriptions } from "./tool-metadata.ts";
+import { formatSchema, hasSchemaDescriptions } from "./tool-metadata.ts";
 import { renderTsShape } from "./ts-shape.ts";
+import { getObservedOutput, renderOutputShape } from "./output-shape.ts";
+import type { ObservedOutput } from "./output-shape.ts";
 import type { ContentBlock } from "./types.ts";
 
 export const DEFAULT_MCP_SCRIPT_TIMEOUT_MS = 30_000;
 const MCP_SCRIPT_INTERMEDIATE_MAX_BYTES = 16 * 1024 * 1024;
 const MCP_SCRIPT_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
+const SEEN_FIELDS_MAX_CHARS = 8 * 1024;
+const EMPTY_RETURNS = new Set(["[]", "{}", "null", ""]);
+
+// Spelled out from the call because models otherwise read `content` off the { ok, data } envelope.
+// Names the server only when the path alone would not reach this server's tool, e.g. a name two servers share.
+const observedTarget = (state: McpExtensionState, observed: ObservedOutput, path: string, server: string) => {
+  const scope = unscopedCallReachesServer(state, path, server) ? "" : `, { server: ${JSON.stringify(server)} }`;
+  const call = `(await tools.call(${JSON.stringify(path)}, args${scope}))`;
+  return observed.source === "structuredContent" ? `${call}.data.structuredContent` : `JSON.parse(${call}.data.content[0].text)`;
+};
 
 class McpScriptTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -28,10 +39,10 @@ class McpScriptTimeoutError extends Error {
 }
 
 type SearchInput = { query?: unknown; server?: unknown; limit?: unknown; offset?: unknown; searchMode?: unknown; regex?: unknown };
-type DescribeInput = { path?: unknown };
+type DescribeInput = { path?: unknown; server?: unknown };
 type WorkerMessage =
   | { type: "emit"; block: unknown }
-  | { type: "call"; id: number; path: string; args?: unknown }
+  | { type: "call"; id: number; path: string; args?: unknown; server?: string }
   | { type: "evaluate"; id: number; input: unknown }
   | { type: "search"; id: number; input?: unknown }
   | { type: "describe"; id: number; input?: unknown }
@@ -87,6 +98,19 @@ function textFromContent(content: ContentBlock[]): string {
     .join("\n");
 }
 
+function resultErrorMessage(result: { content: ContentBlock[]; details: Record<string, unknown> }): string {
+  return typeof result.details.message === "string" ? result.details.message : textFromContent(result.content);
+}
+
+/** Script-usable guidance for scoping errors whose shared text points at mcp(), which scripts cannot call. */
+function scriptScopeMessage(code: string, path: string, server: unknown, retry: string): string | undefined {
+  if (code === "server_not_found") return `Server "${String(server)}" not found. Use the server from a tools.search hit.`;
+  if (code !== "ambiguous_tool") return undefined;
+  return typeof server === "string"
+    ? `Tool "${path}" matches multiple tools on server "${server}". Use an exact path from tools.search({ query: "", server: ${JSON.stringify(server)} }).`
+    : `Tool "${path}" matches multiple servers. Pass the server from tools.search: ${retry}.`;
+}
+
 function abortReasonError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason ?? "MCP request aborted"));
 }
@@ -96,9 +120,13 @@ function parseWorkerMessage(value: unknown): WorkerMessage | null {
   const message = value as Record<string, unknown>;
   if (message.type === "emit" && "block" in message) return { type: "emit", block: message.block };
   if (message.type === "call" && typeof message.id === "number" && typeof message.path === "string") {
-    return "args" in message
-      ? { type: "call", id: message.id, path: message.path, args: message.args }
-      : { type: "call", id: message.id, path: message.path };
+    return {
+      type: "call",
+      id: message.id,
+      path: message.path,
+      ...("args" in message ? { args: message.args } : {}),
+      ...(typeof message.server === "string" ? { server: message.server } : {}),
+    };
   }
   if (message.type === "evaluate" && typeof message.id === "number" && "input" in message) {
     return { type: "evaluate", id: message.id, input: message.input };
@@ -161,18 +189,21 @@ export async function runMcpScript(
   }));
   let callsSnapshot: ScriptOperation[] | undefined;
   let intermediateBytes = 0;
+  // Successful calls by server and path, for listing the result fields they returned when the script fails or finds nothing.
+  const calledTools = new Map<string, { path: string; server: string; tool: string }>();
+  let returnedEmpty = false;
   const reserveIntermediateBytes = (dataJson: string): boolean => {
     const bytes = Buffer.byteLength(dataJson, "utf8");
     if (bytes > MCP_SCRIPT_INTERMEDIATE_MAX_BYTES - intermediateBytes) return false;
     intermediateBytes += bytes;
     return true;
   };
-  const callTool = async (path: string, args?: Record<string, unknown>): Promise<WorkerResultPayload> => {
+  const callTool = async (path: string, args?: Record<string, unknown>, server?: string): Promise<WorkerResultPayload> => {
     // Record before dispatch so calls still in flight at timeout/abort appear in the trace.
     const startedAt = Date.now();
     const index = calls.push({ operation: "call", path, ok: false, error: "incomplete", durationMs: 0, startedAt }) - 1;
     let dataJson: string | undefined;
-    const result = await executeCall(state, path, args, undefined, getPiTools, callSignal, "script", {
+    const result = await executeCall(state, path, args, server, getPiTools, callSignal, "script", {
       onSuccess(data) {
         // Serialize once for both byte accounting and worker transfer, never for display.
         dataJson = JSON.stringify(data);
@@ -187,9 +218,7 @@ export async function runMcpScript(
         : [];
       const message = errorCode === "tool_not_found"
         ? `Tool "${path}" not found. Use await tools.search({ query: "..." }) inside mcpScript.${suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}` : ""}`
-        : typeof details.message === "string"
-          ? details.message
-          : textFromContent(result.content);
+        : scriptScopeMessage(errorCode, path, details.server, "tools.call(path, args, { server })") ?? resultErrorMessage(result);
       calls[index] = { operation: "call", path, ok: false, error: errorCode, durationMs: Date.now() - startedAt, startedAt };
       return {
         envelope: { ok: false, error: { code: errorCode, message } },
@@ -209,6 +238,10 @@ export async function runMcpScript(
     }
     // Rejected responses do not consume budget. This bounds transfer, not upstream allocation.
     calls[index] = { operation: "call", path, ok: true, durationMs: Date.now() - startedAt, startedAt };
+    if (typeof details.server === "string" && typeof details.tool === "string") {
+      const calledPath = typeof details.canonicalTool === "string" ? details.canonicalTool : path;
+      calledTools.set(JSON.stringify([details.server, calledPath]), { path: calledPath, server: details.server, tool: details.tool });
+    }
     return { dataJson };
   };
 
@@ -278,34 +311,27 @@ export async function runMcpScript(
     const index = calls.push({ operation: "search", query, ok: false, error: "incomplete", durationMs: 0, startedAt }) - 1;
     let error: unknown;
     try {
-      if (input?.searchMode !== undefined && input.searchMode !== "lexical" && input.searchMode !== "semantic") {
-        error = "invalid_search_mode";
-        return { items: [], total: 0, hasMore: false, nextOffset: null, error: { code: "invalid_search_mode", message: "Search mode must be lexical or semantic." } };
+      const outcome = await findTools(state, {
+        query,
+        regex: input?.regex === true,
+        server: typeof input?.server === "string" ? input.server : undefined,
+        searchMode: input?.searchMode,
+        signal: callSignal,
+        semanticEvaluator: async (semanticState, semanticInput, options) => {
+          const rejected = admitEvaluation(semanticInput);
+          if (rejected) return rejected;
+          const envelope = await (semanticEvaluator ?? evaluateJev)(semanticState, semanticInput, options);
+          return chargeEvaluationTokens(envelope);
+        },
+        observedSources: [...observedSources],
+      });
+      if ("error" in outcome) {
+        error = String(outcome.error.details.error);
+        return { items: [], total: 0, hasMore: false, nextOffset: null, error: { code: error, message: resultErrorMessage(outcome.error) } };
       }
-      if (query.trim() === "" && input?.searchMode !== "semantic") {
-        return { items: [], total: 0, hasMore: false, nextOffset: null };
-      }
-      const server = typeof input?.server === "string" ? input.server : undefined;
       const limit = typeof input?.limit === "number" ? input.limit : 12;
       const offset = typeof input?.offset === "number" ? input.offset : 0;
-      const searchMode = input?.searchMode === "semantic" ? "semantic" : "lexical";
-      if (searchMode === "semantic" && input?.regex === true) {
-        error = "invalid_search_mode";
-        return { items: [], total: 0, hasMore: false, nextOffset: null, error: { code: "invalid_search_mode", message: "Semantic search cannot be combined with regex search." } };
-      }
-      const semantic = searchMode === "semantic"
-        ? await semanticSearch(state, query, server, callSignal, async (semanticState, semanticInput, options) => {
-            const rejected = admitEvaluation(semanticInput);
-            if (rejected) return rejected;
-            const envelope = await (semanticEvaluator ?? evaluateJev)(semanticState, semanticInput, options);
-            return chargeEvaluationTokens(envelope);
-          }, [...observedSources])
-        : undefined;
-      if (semantic && !semantic.ok) {
-        error = semantic.error.code;
-        return { items: [], total: 0, hasMore: false, nextOffset: null, error: semantic.error };
-      }
-      const page = paginate(semantic?.matches ?? rankToolMatches(state, query, server), offset, limit);
+      const page = paginate(outcome.matches, offset, limit);
       return {
         ...page,
         items: page.items.map(({ server: matchServer, tool, score }) => ({
@@ -315,7 +341,7 @@ export async function runMcpScript(
           ...(tool.description ? { description: tool.description } : {}),
           score,
         })),
-        ...(semantic ? { backend: semantic.backend } : {}),
+        ...(outcome.backend ? { backend: outcome.backend } : {}),
       };
     } catch (caught) {
       error = caught;
@@ -332,35 +358,45 @@ export async function runMcpScript(
     const path = typeof input?.path === "string" ? input.path : "";
     let error: unknown;
     try {
-      for (const [server, metadata] of state.toolMetadata) {
-        if (isServerInActiveFailureBackoff(state, server)) continue;
-        const tool = findToolByName(metadata, path);
-        if (!tool) continue;
-        const inputShape = tool.inputSchema ? renderTsShape(tool.inputSchema) : null;
-        const inputTypeScript = inputShape ?? (tool.inputSchema ? formatSchema(tool.inputSchema) : null);
+      const target = resolveDescribeTarget(state, path, typeof input?.server === "string" ? input.server : undefined);
+      if ("error" in target) {
+        const details = target.error.details;
+        const code = String(details.error);
+        error = code;
         return {
-          path: tool.name,
-          name: tool.originalName,
-          server,
-          ...(tool.description ? { description: tool.description } : {}),
-          ...(inputTypeScript ? { inputTypeScript } : {}),
-          ...(inputShape && hasSchemaDescriptions(tool.inputSchema)
-            ? { inputGuidance: formatSchema(tool.inputSchema) } : {}),
-          ...(tool.outputSchema !== undefined ? {
-            outputSchemaTarget: "data.structuredContent",
-            outputSchema: tool.outputSchema,
-          } : {}),
+          path,
+          error: {
+            code,
+            message: code === "tool_not_found"
+              ? `Tool not found: ${path}`
+              : scriptScopeMessage(code, path, details.server, "tools.describe({ path, server })") ?? resultErrorMessage(target.error),
+            suggestions: Array.isArray(details.suggestions) ? details.suggestions : [],
+          },
         };
       }
-      const suggestions = path ? rankSuggestions(state, path, 5) : [];
-      error = "tool_not_found";
+      const { server, tool } = target;
+      const inputShape = tool.inputSchema ? renderTsShape(tool.inputSchema) : null;
+      const inputTypeScript = inputShape ?? (tool.inputSchema ? formatSchema(tool.inputSchema) : null);
+      const observed = tool.resourceUri ? undefined : getObservedOutput(state, server, tool);
       return {
-        path,
-        error: {
-          code: "tool_not_found",
-          message: `Tool not found: ${path}`,
-          suggestions,
-        },
+        path: tool.name,
+        name: tool.originalName,
+        server,
+        ...(tool.description ? { description: tool.description } : {}),
+        ...(inputTypeScript ? { inputTypeScript } : {}),
+        ...(inputShape && hasSchemaDescriptions(tool.inputSchema)
+          ? { inputGuidance: formatSchema(tool.inputSchema) } : {}),
+        ...(tool.outputSchema !== undefined ? {
+          outputSchemaTarget: "data.structuredContent",
+          outputSchema: tool.outputSchema,
+        } : {}),
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
+        ...(observed ? {
+          observedOutput: {
+            target: observedTarget(state, observed, tool.name, server),
+            typeScript: renderOutputShape(observed.shape),
+          },
+        } : {}),
       };
     } catch (caught) {
       error = caught;
@@ -447,6 +483,8 @@ export async function runMcpScript(
             rejectOutputBudget();
             return;
           }
+          const returned = message.returnBlock as { type?: unknown; text?: unknown } | undefined;
+          returnedEmpty = returned?.type === "text" && typeof returned.text === "string" && EMPTY_RETURNS.has(returned.text.trim());
           completed = true;
           resolve();
           return;
@@ -460,7 +498,7 @@ export async function runMcpScript(
         void (async () => {
           let payload: WorkerResultPayload;
           if (message.type === "call") {
-            payload = await callTool(message.path, message.args as Record<string, unknown> | undefined);
+            payload = await callTool(message.path, message.args as Record<string, unknown> | undefined, message.server);
           } else if (message.type === "evaluate") {
             payload = await evaluate(message.input);
           } else if (message.type === "search") {
@@ -504,10 +542,30 @@ export async function runMcpScript(
     await worker?.terminate();
   }
 
+  // A script that fails or finds nothing after calling a tool without an output schema usually guessed
+  // the result fields wrong. Listing the fields seen saves a separate turn spent looking at the data.
+  let seenFields: string | undefined;
+  if (errorCode === "timeout" || errorCode === "script_error" || returnedEmpty || output.length === 0) {
+    const sections: string[] = [];
+    let chars = 0;
+    for (const { path, server, tool } of calledTools.values()) {
+      const meta = state.toolMetadata.get(server)?.find(entry => entry.originalName === tool && !entry.resourceUri);
+      const observed = meta && getObservedOutput(state, server, meta);
+      if (!observed) continue;
+      const section = `${observedTarget(state, observed, path, server)} is:\n${renderOutputShape(observed.shape)}`;
+      if (chars + section.length > SEEN_FIELDS_MAX_CHARS) break;
+      chars += section.length;
+      sections.push(section);
+    }
+    if (sections.length > 0) {
+      seenFields = `\n\n[Result fields seen from the tools this script called (names and types only, not a contract):\n${sections.join("\n\n")}]`;
+    }
+  }
+
   // Snapshot before the asynchronous output guard; the terminated worker can no longer emit.
   const guarded = await guardMcpOutput(
     output.length > 0 ? [...output] : [{ type: "text", text: "(no output)" }],
-    resolveMcpOutputGuardOptions(state.config.settings),
+    { ...resolveMcpOutputGuardOptions(state.config.settings), ...(seenFields ? { footer: seenFields } : {}) },
   );
   return {
     content: guarded.content,

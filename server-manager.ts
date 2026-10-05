@@ -18,6 +18,7 @@ import {
   type SubscriptionFilter,
   type CacheableRequestOptions,
   type RequestOptions,
+  RegistrationRejectedError,
   type UrlElicitationRequiredError,
   type VersionNegotiationOptions,
 } from "@modelcontextprotocol/client";
@@ -43,7 +44,7 @@ import { logger } from "./logger.ts";
 import { RESOURCE_MIME_TYPE } from "./ui-app-bridge-helpers.ts";
 import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
-import { extractOAuthConfig, supportsOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
+import { explainRegistrationRejection, extractOAuthConfig, supportsOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import {
   captureOAuthAuthority,
   inspectAuthForUrl,
@@ -64,6 +65,7 @@ import type { TaskEnabledSession } from "@modelcontextprotocol/ext-tasks/client"
 import {
   interpolateEnvVars,
   expandHomePath,
+  providerAuthUrlError,
   resolveBearerToken,
   resolveCommandSecret,
   resolveCommandSecretsRecord,
@@ -110,17 +112,26 @@ function isLiteralLocalAddress(url: string): boolean {
   return local.check(hostname, family === 6 ? "ipv6" : "ipv4");
 }
 
-function localNetworkFailureCodes(error: unknown, seen = new Set<object>()): string[] {
+function isLoopbackUrl(url: string): boolean {
+  return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname);
+}
+
+const LOCAL_NETWORK_FAILURE_CODES = ["EHOSTUNREACH", "ENETUNREACH", "EACCES"];
+
+function networkFailureCodes(error: unknown, wanted: readonly string[], seen = new Set<object>()): string[] {
   if (typeof error !== "object" || error === null || seen.has(error)) return [];
   seen.add(error);
   const codes: string[] = [];
-  if ("code" in error && typeof error.code === "string"
-    && ["EHOSTUNREACH", "ENETUNREACH", "EACCES"].includes(error.code)) {
+  if ("code" in error && typeof error.code === "string" && wanted.includes(error.code)) {
     codes.push(error.code);
   }
-  if ("cause" in error) codes.push(...localNetworkFailureCodes(error.cause, seen));
+  if ("cause" in error) codes.push(...networkFailureCodes(error.cause, wanted, seen));
+  // SdkError keeps its cause under data, e.g. a refused connection during protocolVersion "auto" negotiation.
+  if (error instanceof SdkError && typeof error.data === "object" && error.data !== null && "cause" in error.data) {
+    codes.push(...networkFailureCodes(error.data.cause, wanted, seen));
+  }
   if (error instanceof AggregateError) {
-    for (const nested of error.errors) codes.push(...localNetworkFailureCodes(nested, seen));
+    for (const nested of error.errors) codes.push(...networkFailureCodes(nested, wanted, seen));
   }
   return [...new Set(codes)];
 }
@@ -244,6 +255,36 @@ export function isTransientHttpConnectError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Forward as url+init with the caller's own signal, never as a Request object: undici links a
+ * Request's signal to its source weakly, so once the wrapper Request is garbage-collected an
+ * abort no longer reaches the fetch and long-lived SSE GETs keep their socket (pi never exits).
+ */
+function forwardInit(
+  input: URL | RequestInfo,
+  init: RequestInit | undefined,
+  request: Request,
+  overrides: RequestInit = {},
+): [string, RequestInit] {
+  const signal = init?.signal ?? (input instanceof Request ? input.signal : request.signal);
+  return [request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+    cache: request.cache,
+    credentials: request.credentials,
+    integrity: request.integrity,
+    keepalive: request.keepalive,
+    mode: request.mode,
+    redirect: request.redirect,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+    signal,
+    ...(request.body ? { duplex: "half" } : {}),
+    ...overrides,
+  } as RequestInit];
+}
+
 /** Wrap a FetchLike so each request re-resolves the bearer token via the resolver. */
 function createBearerCommandFetch(
   resolver: BearerCommandResolver,
@@ -256,9 +297,44 @@ function createBearerCommandFetch(
     const request = new Request(input, init);
     const token = await resolver.resolve(request.signal);
     const headers = new Headers(request.headers);
-    headers.set("Authorization", `Bearer ${token}`);
-    // Composed runtime fetches accept Request despite the SDK's narrower type.
-    return innerFetch(new Request(request, { headers }));
+    try {
+      headers.set("Authorization", `Bearer ${token}`);
+    } catch {
+      // The Headers error quotes the value, so it must not surface.
+      throw new TypeError("bearerTokenCommand returned a token that is not a valid header value");
+    }
+    return innerFetch(...forwardInit(input, init, request, { headers }));
+  };
+}
+
+/**
+ * Wrap a FetchLike so each request to the server's origin carries the Pi provider's current token.
+ * Other origins get no token, and redirects are refused so the token cannot follow one.
+ */
+function createProviderTokenFetch(
+  serverUrl: string,
+  provider: string,
+  providerToken: (provider: string) => Promise<string | undefined>,
+  delegate: FetchLike | undefined,
+): FetchLike {
+  const origin = new URL(serverUrl).origin;
+  const innerFetch = delegate
+    ? (input: URL | RequestInfo, init?: RequestInit) => delegate(input as URL, init)
+    : (input: URL | RequestInfo, init?: RequestInit) => globalThis.fetch(input, init);
+  return async (input, init) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).origin !== origin) return innerFetch(...forwardInit(input, init, request));
+    const token = await providerToken(provider);
+    // Without a token the request is not sent; the 401 marks the server as needing sign-in.
+    if (!token) return new Response(null, { status: 401 });
+    const headers = new Headers(request.headers);
+    try {
+      headers.set("Authorization", `Bearer ${token}`);
+    } catch {
+      // The Headers error quotes the value, so it must not surface.
+      throw new TypeError(`Pi provider "${provider}" returned a token that is not a valid header value`);
+    }
+    return innerFetch(...forwardInit(input, init, request, { headers, redirect: "error" }));
   };
 }
 
@@ -293,6 +369,7 @@ export class McpServerManager {
   private connectAttempts = new Map<string, AbortController>();
   private traceSettings: McpTraceSettings | undefined;
   private traceWriter: McpTraceWriter | undefined;
+  private providerToken: ((provider: string) => Promise<string | undefined>) | undefined;
   private stopped = false;
 
   /** Default cwd for stdio servers without an explicit config `cwd`. */
@@ -351,6 +428,21 @@ export class McpServerManager {
 
   getAuthStorageOptions(): AuthStorageOptions {
     return this.authStorageOptions;
+  }
+
+  /** Token lookup for `auth.provider` servers; only a Pi session's model registry provides one. */
+  setProviderToken(providerToken: (provider: string) => Promise<string | undefined>): void {
+    this.providerToken = providerToken;
+  }
+
+  /** Covers config that bypassed file validation (runtime registrations, env-resolved URLs). */
+  private validateProviderAuth(name: string, definition: ServerDefinition): void {
+    if (typeof definition.auth !== "object") return;
+    const urlError = providerAuthUrlError(resolveServerUrl(definition) ?? "");
+    if (urlError) throw new Error(`MCP server "${name}": ${urlError}`);
+    if (!this.providerToken) {
+      throw new Error(`MCP server "${name}": auth.provider isn't available here; it needs a Pi session whose model registry provides provider tokens (Pi 0.99.2 or later)`);
+    }
   }
 
   setOAuthRuntime(runtime: McpOAuthRuntime): void {
@@ -418,6 +510,7 @@ export class McpServerManager {
 
   async connect(name: string, definition: ServerDefinition, signal?: AbortSignal): Promise<ServerConnection> {
     validateCaFile(definition);
+    this.validateProviderAuth(name, definition);
     if (isServerDisabled(definition)) throw new Error(`MCP server "${name}" is disabled`);
     if (this.stopped) throw new Error("MCP server manager is closed");
     const ownedSignal = combineAbortSignals(this.runtimeSignal, signal);
@@ -516,6 +609,7 @@ export class McpServerManager {
     signal?: AbortSignal,
   ): Promise<ServerConnection> {
     validateCaFile(definition);
+    this.validateProviderAuth(name, definition);
     if (isServerDisabled(definition)) throw new Error(`MCP server "${name}" is disabled`);
     if (this.stopped) throw new Error("MCP server manager is closed");
     const ownedSignal = combineAbortSignals(this.runtimeSignal, signal);
@@ -1257,7 +1351,7 @@ export class McpServerManager {
 
       // A cleanup failure remains a setup failure rather than being hidden
       // behind needs-auth.
-      if (isUnauthorizedHttpError(error) && supportsOAuth(definition) && cleanupFailures.length === 0) {
+      if (isUnauthorizedHttpError(error) && (supportsOAuth(definition) || typeof definition.auth === "object") && cleanupFailures.length === 0) {
         if (!invalidated) {
           invalidateAuthEntryCache(name, this.authStorageOptions);
           invalidated = true;
@@ -1291,9 +1385,15 @@ export class McpServerManager {
   }
 
   private async enrichHttpConnectionError(definition: ServerDefinition, error: unknown): Promise<Error> {
+    // The transport's OAuth provider can register a client during connect, bypassing startAuth.
+    if (error instanceof RegistrationRejectedError) return explainRegistrationRejection(error, resolveServerUrl(definition)!);
     const originalMessage = error instanceof Error ? error.message : String(error);
+    if (networkFailureCodes(error, ["ECONNREFUSED"]).length > 0 && isLoopbackUrl(resolveServerUrl(definition)!)) {
+      const url = new URL(resolveServerUrl(definition)!);
+      return new Error(`${originalMessage} — Nothing is listening at ${url.origin}${url.pathname}. Start the app or local process that serves this MCP server.`, { cause: error });
+    }
     if (process.platform === "darwin") {
-      const codes = localNetworkFailureCodes(error);
+      const codes = networkFailureCodes(error, LOCAL_NETWORK_FAILURE_CODES);
       if (codes.length > 0 && isLiteralLocalAddress(resolveServerUrl(definition)!)) {
         return new Error(`${originalMessage} — ${codes.join(", ")} — macOS Local Network Privacy may be blocking access. Check System Settings > Privacy & Security > Local Network for the app hosting Pi; enable access if listed and restart it. Try launching Pi from Terminal.app or SSH. Routing or firewall problems can also cause this error.`, { cause: error });
       }
@@ -1401,6 +1501,7 @@ export class McpServerManager {
           if (this.runtimeSignal?.aborted) return;
           const accepted = this.acceptedUrlElicitations.get(serverName);
           if (!accepted?.delete(notification.params.elicitationId)) return;
+          this.touch(serverName);
           this.elicitationConfig?.ui.notify(
             `MCP browser interaction for ${serverName} completed. You can retry the tool now.`,
             "info",
@@ -1426,8 +1527,7 @@ export class McpServerManager {
     if (!connection || connection.client !== client || connection.status !== "connected") return;
     connection.tools = tools;
     connection.toolsRevision = (connection.toolsRevision ?? 0) + 1;
-    this.metadataListChangedListener?.(serverName, "tools-list-changed");
-    this.pendingMetadataPublications.delete(serverName);
+    this.publishMetadataChanged(serverName, connection, "tools-list-changed");
   }
 
   private handlePromptsListChanged(
@@ -1445,8 +1545,7 @@ export class McpServerManager {
     if (!connection || connection.client !== client || connection.status !== "connected") return;
     connection.prompts = prompts;
     connection.promptDiscoveryFailed = false;
-    this.metadataListChangedListener?.(serverName, "prompts-list-changed");
-    this.pendingMetadataPublications.delete(serverName);
+    this.publishMetadataChanged(serverName, connection, "prompts-list-changed");
   }
 
   private handleResourcesListChanged(
@@ -1464,8 +1563,7 @@ export class McpServerManager {
     if (!connection || connection.client !== client || connection.status !== "connected") return;
     connection.resources = resources;
     connection.resourceDiscoveryFailed = false;
-    this.metadataListChangedListener?.(serverName, "resources-list-changed");
-    this.pendingMetadataPublications.delete(serverName);
+    this.publishMetadataChanged(serverName, connection, "resources-list-changed");
   }
 
   async handleUrlElicitationRequired(
@@ -1486,6 +1584,8 @@ export class McpServerManager {
 
   private rememberUrlElicitation(serverName: string, elicitationId: string): void {
     if (this.runtimeSignal?.aborted) return;
+    // The browser flow can outlast the call that started it; give the user one idle timeout to finish and retry.
+    this.touch(serverName);
     let accepted = this.acceptedUrlElicitations.get(serverName);
     if (!accepted) {
       accepted = new Set();
@@ -1507,12 +1607,11 @@ export class McpServerManager {
     throwIfAborted(signal);
     const serverUrl = resolveServerUrl(definition)!;
     const url = new URL(serverUrl);
+    const provider = typeof definition.auth === "object" ? definition.auth.provider : undefined;
 
     // Resolve secret commands only for this connection attempt, without
     // mutating the persisted configuration.
     const literalHeaders = isBuiltInAgentPlugin(definition, "headers");
-    const hasCommandHeader = !literalHeaders && Object.values(definition.headers ?? {})
-      .some(value => value.startsWith("!") && !value.startsWith("!!"));
     const oauthEnabled = supportsOAuth(definition);
     let headers: Record<string, string>;
     if (literalHeaders) {
@@ -1551,11 +1650,12 @@ export class McpServerManager {
       }
     }
 
-    if (hasCommandHeader || commandBearer) {
+    for (const [name, value] of Object.entries(headers)) {
       try {
-        new Headers(headers);
+        new Headers({ [name]: value });
       } catch {
-        throw new Error(`Failed to resolve MCP server "${serverName}" HTTP command secret: command returned an invalid header value`);
+        // The Headers error quotes the value, which is often a secret.
+        throw new Error(`MCP server "${serverName}" HTTP header "${name}" has an invalid name or value`);
       }
     }
 
@@ -1619,7 +1719,9 @@ export class McpServerManager {
     // requestHeadersCommand stays last in the header chain.
     const bearerFetch = bearerCommandResolver
       ? createBearerCommandFetch(bearerCommandResolver, commandFetch)
-      : commandFetch;
+      : provider !== undefined
+        ? createProviderTokenFetch(serverUrl, provider, this.providerToken!, commandFetch)
+        : commandFetch;
     const requestFetch = oauthEnabled
       ? createOAuthFetch(serverUrl, () => serviceHeaders, this.oauthRuntime?.signal, {
         // MCP streams outlive individual auth requests; retain SDK request deadlines.
@@ -1635,13 +1737,17 @@ export class McpServerManager {
     > => {
       const authProvider = "provider" in authState ? authState.provider : undefined;
       let sseFetchFailure: unknown;
-      const transportFetch: FetchLike | undefined = kind === "sse" && process.platform === "darwin" && isLiteralLocalAddress(serverUrl)
+      const sseFailureCodes = kind !== "sse" ? []
+        : isLoopbackUrl(serverUrl) ? ["ECONNREFUSED"]
+        : process.platform === "darwin" && isLiteralLocalAddress(serverUrl) ? LOCAL_NETWORK_FAILURE_CODES
+        : [];
+      const transportFetch: FetchLike | undefined = sseFailureCodes.length > 0
         ? async (input, init) => {
           try {
             return await (requestFetch ?? globalThis.fetch)(input, init);
           } catch (error) {
             // EventSource discards the fetch cause before the SDK creates SseError.
-            if (localNetworkFailureCodes(error).length > 0) sseFetchFailure = error;
+            if (networkFailureCodes(error, sseFailureCodes).length > 0) sseFetchFailure = error;
             throw error;
           }
         }
@@ -1720,7 +1826,7 @@ export class McpServerManager {
         continue;
       }
       if (isUnauthorizedHttpError(result.error)) {
-        if (supportsOAuth(definition)) {
+        if (supportsOAuth(definition) || provider !== undefined) {
           if (!invalidated) {
             invalidateAuthEntryCache(serverName, this.authStorageOptions);
             invalidated = true;

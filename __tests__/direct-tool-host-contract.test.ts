@@ -105,6 +105,7 @@ describe("direct tool host contracts", () => {
         settings: { directToolResultDetails: "bounded" },
         mcpServers: { demo: { command: "demo" } },
       },
+      toolMetadata: new Map(),
       manager: {
         ensureListen: vi.fn().mockResolvedValue(undefined),
         getConnection: vi.fn(() => connection),
@@ -113,6 +114,7 @@ describe("direct tool host contracts", () => {
         incrementInFlight: vi.fn(),
         decrementInFlight: vi.fn(),
       },
+      toolMetadata: new Map(),
       failureTracker: new Map(),
       completedUiSessions: [],
     } as any;
@@ -153,6 +155,7 @@ describe("direct tool host contracts", () => {
         incrementInFlight: vi.fn(),
         decrementInFlight: vi.fn(),
       },
+      toolMetadata: new Map(),
       failureTracker: new Map(),
       completedUiSessions: [],
     } as any;
@@ -169,6 +172,38 @@ describe("direct tool host contracts", () => {
     expect(result.details).toMatchObject({ error: "call_failed", server: "demo" });
     expect(close).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledWith("demo");
+  });
+
+  it.each([
+    ["a result", false],
+    ["an error result", true],
+  ])("passes the server's structuredContent of %s on only for deferred tools", async (_label, isError) => {
+    const structuredContent = { rows: [{ id: 7 }] };
+    const connection = {
+      status: "connected",
+      client: { callTool: vi.fn().mockResolvedValue({ content: [{ type: "text", text: "7" }], structuredContent, ...(isError ? { isError } : {}) }) },
+    };
+    const state = {
+      config: { settings: {}, mcpServers: { demo: { command: "demo" } } },
+      manager: {
+        getConnection: vi.fn(() => connection),
+        getRequestOptions: vi.fn(() => undefined),
+        touch: vi.fn(),
+        incrementInFlight: vi.fn(),
+        decrementInFlight: vi.fn(),
+      },
+      toolMetadata: new Map(),
+      failureTracker: new Map(),
+      completedUiSessions: [],
+    } as any;
+    const { createDirectToolExecutor } = await import("../direct-tools.ts");
+    const spec = { serverName: "demo", originalName: "rows", prefixedName: "demo_rows", description: "Rows" };
+
+    const deferred = await createDirectToolExecutor(() => state, () => null, spec, true)("call-1", {}, undefined, undefined, undefined as any);
+    const direct = await createDirectToolExecutor(() => state, () => null, spec)("call-2", {}, undefined, undefined, undefined as any);
+
+    expect(deferred.structuredContent).toEqual(structuredContent);
+    expect(direct).not.toHaveProperty("structuredContent");
   });
 
   it("returns a bounded raw MCP result for direct resources when configured", async () => {

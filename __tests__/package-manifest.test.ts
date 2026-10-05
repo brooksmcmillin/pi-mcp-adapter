@@ -16,9 +16,9 @@ const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf
 };
 
 const hostPeerPackages = {
-  "@earendil-works/pi-ai": { peer: "^0.84.1 || ^0.85.0 || ^0.86.0 || ^0.87.0", dev: "0.87.0" },
-  "@earendil-works/pi-tui": { peer: "*", dev: "0.87.0" },
-  "typebox": { peer: "*", dev: "1.3.3" },
+  "@earendil-works/pi-ai": { peer: "^0.84.1 || ^0.85.0 || ^0.86.0 || ^0.87.0 || ^0.99.0 || ^1.0.0", dev: "1.0.0", optional: true },
+  "@earendil-works/pi-tui": { peer: "*", dev: "1.0.0", optional: false },
+  "typebox": { peer: "*", dev: "1.3.27", optional: false },
 };
 
 describe("package.json files", () => {
@@ -27,13 +27,21 @@ describe("package.json files", () => {
     expect(skill).toMatch(/^disable-model-invocation:\s*true\s*$/m);
   });
 
-  it("ships the OAuth guide linked by the published README", () => {
+  it("ships every doc section the published README links to", () => {
     const readme = readFileSync(join(repoRoot, "README.md"), "utf-8");
-    const guide = readme.match(/\[OAuth\]\(([^)#]+)#token-storage\)/)?.[1];
+    const links = [...readme.matchAll(/\]\(([^)]*docs\/[^)]*)\)/g)].map(([, url]) => {
+      const parsed = url!.match(/^https:\/\/github\.com\/nicobailon\/pi-mcp-adapter\/blob\/main\/(docs\/[\w-]+\.md)(?:#([\w-]+))?$/);
+      expect(parsed, url).not.toBeNull();
+      return parsed!;
+    });
 
-    expect(guide).toBe("OAUTH.md");
-    expect(packageJson.files).toContain(guide);
-    expect(readFileSync(join(repoRoot, "OAUTH.md"), "utf-8")).toMatch(/^## Token Storage$/m);
+    expect(links.length).toBeGreaterThan(0);
+    expect(packageJson.files).toContain("docs");
+    for (const [, path, anchor] of links) {
+      const headings = readFileSync(join(repoRoot, path!), "utf-8").match(/^#+ .+$/gm)!
+        .map((heading) => heading.replace(/^#+ /, "").toLowerCase().replace(/[^\w\- ]/g, "").replaceAll(" ", "-"));
+      if (anchor) expect(headings, `${path}#${anchor}`).toContain(anchor);
+    }
   });
 
   it("exports source entry points and plain Node host helpers", () => {
@@ -125,19 +133,47 @@ describe("package.json dependency policy", () => {
     expect(packageJson.dependencies?.["fs-native-extensions"]).toBeUndefined();
   });
 
-  it("treats Pi host packages as optional peers with exact dev pins", () => {
+  it("declares Pi host packages as peers with exact dev pins", () => {
     const entries = Object.entries(hostPeerPackages);
 
     for (const [name, versions] of entries) {
       expect(packageJson.peerDependencies?.[name]).toBe(versions.peer);
-      expect(packageJson.peerDependenciesMeta?.[name]?.optional).toBe(true);
+      expect(packageJson.peerDependenciesMeta?.[name]?.optional ?? false).toBe(versions.optional);
       expect(packageJson.dependencies?.[name]).toBeUndefined();
       expect(packageJson.devDependencies?.[name]).toBe(versions.dev);
     }
   });
 
+  // Hosts that import the package outside Pi's extension loader resolve peers with Node, so a peer
+  // imported at runtime cannot be optional. Type-only peers stay optional to skip their install.
+  it("marks a Pi host peer optional only when shipped source imports it for types alone", () => {
+    const shippedSources = (packageJson.files ?? [])
+      .filter((file) => /\.(?:ts|js|mjs|cjs)$/.test(file))
+      .map((file) => readFileSync(join(repoRoot, file), "utf-8"));
+
+    for (const [name, versions] of Object.entries(hostPeerPackages)) {
+      const specifier = `["']${name}(?:/[^"']*)?["']`;
+      const runtimeImport = new RegExp([
+        `^\\s*(?:import|export)\\s+(?!type\\s)[^;]*?from\\s+${specifier}`,
+        `^\\s*import\\s+${specifier}`,
+        `\\b(?:import|require)\\(\\s*${specifier}\\s*\\)`,
+      ].join("|"), "m");
+      expect(shippedSources.some((source) => runtimeImport.test(source)), name).toBe(!versions.optional);
+    }
+  });
+
+  it("tests extension APIs against Pi 1.0.0", () => {
+    expect(packageJson.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe("1.0.0");
+  });
+
   it("uses the stable modular SDK v2 client/core packages without the legacy monolithic SDK", () => {
-    expect(packageJson.dependencies?.["@modelcontextprotocol/ext-apps"]).toBeDefined();
+    const packageLock = JSON.parse(readFileSync(join(repoRoot, "package-lock.json"), "utf-8")) as {
+      packages: Record<string, { dev?: boolean }>;
+    };
+    const productionLegacySdk = Object.keys(packageLock.packages).filter(
+      (path) => path.endsWith("node_modules/@modelcontextprotocol/sdk") && !packageLock.packages[path]?.dev
+    );
+    expect(productionLegacySdk).toEqual([]);
     expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBeUndefined();
     expect(packageJson.dependencies?.["@modelcontextprotocol/client"]).toBe("2.0.0");
     expect(packageJson.dependencies?.["@modelcontextprotocol/core"]).toBe("2.0.0");

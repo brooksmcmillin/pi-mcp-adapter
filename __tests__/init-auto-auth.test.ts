@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServerManager } from "../server-manager.ts";
 import { initializeMcp } from "../init.ts";
+import { saveMetadataCache } from "../metadata-cache.ts";
 
 const mocks = vi.hoisted(() => ({
   authenticateServer: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("../metadata-cache.ts", () => ({
   }),
   getMissingConfiguredDirectToolServers: vi.fn(() => []),
   isServerCacheValid: vi.fn(() => false),
+  keepOutputShapes: vi.fn(() => undefined),
   loadMetadataCache: vi.fn(() => null),
   reconstructPromptMetadata: vi.fn(() => []),
   reconstructToolMetadata: vi.fn(() => []),
@@ -58,6 +60,7 @@ describe("startup autoAuth", () => {
   beforeEach(() => {
     mocks.authenticateServer.mockReset().mockResolvedValue({ ok: true });
     mocks.started.mockReset();
+    vi.mocked(saveMetadataCache).mockClear();
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(McpServerManager.prototype, "getConnection").mockReturnValue(needsAuth);
     vi.spyOn(McpServerManager.prototype, "close").mockResolvedValue();
@@ -77,6 +80,11 @@ describe("startup autoAuth", () => {
       expect.any(AbortSignal), state.oauthRuntime, state.authStorageOptions,
     );
     expect(connect).toHaveBeenCalledTimes(2);
+    expect(state.sessionMetadata?.get("broker")).toMatchObject({ configHash: "hash", tools: [] });
+    expect(saveMetadataCache).toHaveBeenCalledWith(
+      { version: 1, servers: { broker: expect.objectContaining({ configHash: "hash", tools: [] }) } },
+      { startupSnapshot: {} },
+    );
     expect(state.failureTracker.has("broker")).toBe(false);
     expect(notify.mock.calls.some(([message]) => String(message).includes("Failed to connect"))).toBe(false);
   });

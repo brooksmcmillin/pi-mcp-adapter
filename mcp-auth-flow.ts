@@ -8,6 +8,7 @@ import {
   auth as runSdkAuth,
   extractWWWAuthenticateParams,
   LATEST_PROTOCOL_VERSION,
+  RegistrationRejectedError,
   UnauthorizedError,
   validateClientMetadataUrl,
   type AuthOptions,
@@ -442,6 +443,13 @@ function parseOAuthRedirectUri(redirectUri: string): OAuthRedirectTarget {
   }
 }
 
+export function explainRegistrationRejection(error: RegistrationRejectedError, serverUrl: string): Error {
+  const hint = new URL(serverUrl).hostname === "mcp.figma.com"
+    ? "Figma's remote MCP server only accepts approved clients, and Pi isn't approved yet. Use the Figma desktop app's local server instead: run /mcp-adapter setup."
+    : "This server only accepts pre-registered OAuth clients. If the provider gave you a client ID, set oauth.clientId (and oauth.clientSecret if required) for this server."
+  return new Error(`${error.message}. ${hint}`, { cause: error })
+}
+
 /**
  * Start OAuth authentication flow for a server.
  * Returns the authorization URL when browser authorization is required.
@@ -463,6 +471,9 @@ export async function startAuth(
   const signal = combineAbortSignals(runtime.signal, options.signal)
   const generation = runtimeState.generation
   throwIfAborted(signal)
+  const explainRejection = (error: unknown): never => {
+    throw error instanceof RegistrationRejectedError ? explainRegistrationRejection(error, serverUrl) : error
+  }
 
   if (config.grantType === "device_code") {
     const key = getPendingAuthKey(serverName, authStorageOptions)
@@ -519,7 +530,7 @@ export async function startAuth(
       const discovery = applyOAuthConfig(await probeAuthDiscovery(serverUrl, definition, signal), config)
       authority()
       throwIfAborted(signal)
-      const result = await abortable(runSdkAuth(authProvider, { serverUrl, ...discovery, fetchFn }), signal)
+      const result = await abortable(runSdkAuth(authProvider, { serverUrl, ...discovery, fetchFn }).catch(explainRejection), signal)
       authority()
       throwIfAborted(signal)
       if (result !== "AUTHORIZED") {
@@ -613,7 +624,7 @@ export async function startAuth(
     const discovery = applyOAuthConfig(await probeAuthDiscovery(serverUrl, definition, signal), config)
     authority()
     throwIfAborted(signal)
-    const result = await abortable(runSdkAuth(authProvider, { serverUrl, ...discovery, fetchFn }), signal)
+    const result = await abortable(runSdkAuth(authProvider, { serverUrl, ...discovery, fetchFn }).catch(explainRejection), signal)
     authority()
     throwIfAborted(signal)
     if (result === "AUTHORIZED") {
