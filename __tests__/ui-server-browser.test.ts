@@ -24,8 +24,15 @@ function closeServer(server: http.Server): Promise<void> {
 }
 
 async function stopChrome(chrome: ChildProcess): Promise<void> {
+  if (chrome.pid === undefined) return;
+  // Kill the whole process group: helpers outlive a main-only kill on Linux and keep
+  // writing to the profile directory while the test removes it, even after Chrome exits.
+  try {
+    process.kill(-chrome.pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
   if (chrome.exitCode !== null) return;
-  chrome.kill("SIGKILL");
   await Promise.race([
     once(chrome, "exit").then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
@@ -141,7 +148,7 @@ describe("UiServer browser CSP", () => {
         "--host-resolver-rules=MAP localhost 127.0.0.1",
         `--user-data-dir=${profileDir}`,
         handle.url,
-      ], { stdio: "ignore" });
+      ], { stdio: "ignore", detached: true });
 
       const declaredPaths = [
         "/declared/script.js",

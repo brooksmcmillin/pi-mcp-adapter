@@ -1,5 +1,5 @@
 import { Check, Errors } from "typebox/value";
-import type { DirectToolSpec, McpConfig, ToolPrefix } from "./types.ts";
+import type { DirectToolSpec, McpConfig, ToolPrefix, ToolSelectorCandidateIndex } from "./types.ts";
 import { createToolSelectorCandidateIndex, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix, resolveUniqueNameOwnership } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
 import { isServerCacheValid, parseDirectToolSelectors } from "./metadata-cache.ts";
@@ -14,7 +14,7 @@ export function getLargeDirectToolsAdvisory(config: McpConfig, specs: readonly D
   if (config.settings?.warnOnLargeDirectTools === false) return undefined;
   const eagerCount = specs.filter((spec) => !spec.lazy).length;
   if (eagerCount < DIRECT_TOOLS_ADVISORY_THRESHOLD) return undefined;
-  return `MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`;
+  return `MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; the direct tools guide in docs/tools.md recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`;
 }
 
 /**
@@ -82,6 +82,7 @@ export function resolveDirectTools(
 
   const envSelection = envOverride ? parseDirectToolSelectors(envOverride) : null;
   const globalDirect = config.settings?.directTools;
+  let selectorCandidateIndex: ToolSelectorCandidateIndex | undefined;
 
   for (const [serverName, definition] of Object.entries(config.mcpServers)) {
     if (isServerDisabled(definition)) continue;
@@ -115,7 +116,7 @@ export function resolveDirectTools(
     const hasToolFilters =
       (Array.isArray(definition.includeTools) && definition.includeTools.length > 0) ||
       (Array.isArray(definition.excludeTools) && definition.excludeTools.length > 0);
-    const selectorCandidateIndex = hasToolFilters ? (() => {
+    if (hasToolFilters && !selectorCandidateIndex) {
       const candidates = new Set<string>();
       for (const [otherServerName, otherDefinition] of Object.entries(config.mcpServers)) {
         const otherCache = cache.servers[otherServerName];
@@ -132,8 +133,8 @@ export function resolveDirectTools(
           }
         }
       }
-      return createToolSelectorCandidateIndex(candidates);
-    })() : undefined;
+      selectorCandidateIndex = createToolSelectorCandidateIndex(candidates);
+    }
 
     for (const tool of serverCache.tools ?? []) {
       if (!isUiToolVisibleToModel(tool.uiVisibility)) continue;
@@ -199,8 +200,9 @@ export function resolveDirectTools(
  * Live counts/status belong to `mcp({ })`, full instructions to
  * `mcp({ instructions })`.
  */
-export function buildProxyDescription(config: McpConfig): string {
-  let desc = `MCP gateway — URL installation, server status, tool search/describe, auth, and single MCP tool calls. When a user supplies an MCP endpoint URL, install it with the install action. When one request needs several MCP calls with logic between them, use mcpScript. Non-MCP Pi tools should be called directly, not through mcp.\n`;
+export function buildProxyDescription(config: McpConfig, scriptTool = false): string {
+  const scriptHint = scriptTool ? " Use mcpScript for several MCP calls with logic between them." : "";
+  let desc = `MCP gateway — URL installation, server status, tool search/describe, auth, and single MCP tool calls. When a user supplies an MCP endpoint URL, install it with the install action.${scriptHint} Non-MCP Pi tools should be called directly, not through mcp.\n`;
 
   const serverNames = Object.keys(config.mcpServers)
     .filter((serverName) => !isServerDisabled(config.mcpServers[serverName]));

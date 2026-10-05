@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { McpConfig, ServerEntry } from "./types.ts";
+import type { McpConfig, McpToolAnnotations, ServerEntry } from "./types.ts";
 export declare function stripUtf8Bom(raw: string): string;
 export declare function parseJsonWithComments(raw: string): unknown;
 /** Resolve a candidate only when its real path stays within the real root. */
@@ -36,10 +36,19 @@ export declare const TOOL_CALL_ID_REQUEST_META_KEY = "pi-mcp-adapter/toolCallId"
 export declare function withToolCallIdMeta(meta: Record<string, unknown> | undefined, toolCallId: string | undefined): Record<string, unknown> | undefined;
 export declare function normalizeDirectToolInputSchema(schema: unknown): Record<string, unknown>;
 export declare function normalizeToolArguments(value: unknown, context?: string): Record<string, unknown>;
-export declare function formatAuthRequiredMessage(config: Pick<McpConfig, "settings">, serverName: string, defaultMessage: string): string;
+export declare function formatAuthRequiredMessage(config: Pick<McpConfig, "settings" | "mcpServers">, serverName: string, defaultMessage: string): string;
+/** Servers with `auth.provider` sign in through Pi, never through MCP OAuth. */
+export declare function providerSignInMessage(serverName: string, provider: string): string;
+/** Why a server must not receive its `auth.provider` token at `url`, or undefined when it may. */
+export declare function providerAuthUrlError(url: string): string | undefined;
 export declare function formatMcpStatus(config: Pick<McpConfig, "settings">, message: string): string | undefined;
 export declare function formatMcpFooterStatus(config: Pick<McpConfig, "settings">, enabledCount: number, disabledCount: number, connectedCount: number): string | undefined;
 /**
  * Extract the adapter-owned UI stream mode from tool metadata.
  */
 export declare function extractToolUiStreamMode(toolMeta: Record<string, unknown> | undefined): "eager" | "stream-first" | undefined;
+/**
+ * Keep only the spec tool annotations with the right types. Server and cache
+ * input is untrusted, so a malformed field is dropped instead of failing the tool list.
+ */
+export declare function extractToolAnnotations(annotations: unknown): McpToolAnnotations | undefined;

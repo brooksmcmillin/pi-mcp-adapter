@@ -37,7 +37,7 @@ describe("approval broker through Pi registered script calls", () => {
               lifecycle: "eager",
             },
           },
-          settings: { approveTools: true, sampling: false, elicitation: false },
+          settings: { approveTools: true, sampling: false, elicitation: false, scriptMode: true },
         }));
         process.argv.push("--mcp-config", configPath);
         const requests: McpToolApprovalRequest[] = [];

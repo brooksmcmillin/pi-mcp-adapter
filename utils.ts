@@ -4,7 +4,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import stripJsonComments from "strip-json-comments";
-import type { McpConfig, ServerEntry } from "./types.ts";
+import type { McpConfig, McpToolAnnotations, ServerEntry } from "./types.ts";
 
 export function stripUtf8Bom(raw: string): string {
   return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
@@ -436,12 +436,27 @@ function assertJsonSerializable(value: unknown, context: string, path = ""): voi
 }
 
 export function formatAuthRequiredMessage(
-  config: Pick<McpConfig, "settings">,
+  config: Pick<McpConfig, "settings" | "mcpServers">,
   serverName: string,
   defaultMessage: string,
 ): string {
+  const auth = config.mcpServers[serverName]?.auth;
+  if (typeof auth === "object") return providerSignInMessage(serverName, auth.provider);
   const template = config.settings?.authRequiredMessage;
   return template ? template.replaceAll("${server}", serverName) : defaultMessage;
+}
+
+/** Servers with `auth.provider` sign in through Pi, never through MCP OAuth. */
+export function providerSignInMessage(serverName: string, provider: string): string {
+  return `MCP server "${serverName}" needs sign-in. Run /login ${provider}, then /mcp-adapter reconnect ${serverName}.`;
+}
+
+/** Why a server must not receive its `auth.provider` token at `url`, or undefined when it may. */
+export function providerAuthUrlError(url: string): string | undefined {
+  const parsed = URL.canParse(url) ? new URL(url) : undefined;
+  if (parsed?.protocol === "https:") return undefined;
+  if (parsed?.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) return undefined;
+  return "auth.provider requires an https URL, or http on localhost, 127.0.0.1, or [::1]";
 }
 
 export function formatMcpStatus(config: Pick<McpConfig, "settings">, message: string): string | undefined {
@@ -476,4 +491,19 @@ export function extractToolUiStreamMode(toolMeta: Record<string, unknown> | unde
     return streamMode;
   }
   return undefined;
+}
+
+/**
+ * Keep only the spec tool annotations with the right types. Server and cache
+ * input is untrusted, so a malformed field is dropped instead of failing the tool list.
+ */
+export function extractToolAnnotations(annotations: unknown): McpToolAnnotations | undefined {
+  if (!annotations || typeof annotations !== "object") return undefined;
+  const source = annotations as Record<string, unknown>;
+  const kept: McpToolAnnotations = {};
+  if (typeof source.title === "string") kept.title = source.title;
+  for (const key of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const) {
+    if (typeof source[key] === "boolean") kept[key] = source[key];
+  }
+  return Object.keys(kept).length > 0 ? kept : undefined;
 }

@@ -58,6 +58,7 @@ describe("direct tools auto auth", () => {
           demo: { url: "https://api.example.com/mcp", auth: "oauth" },
         },
       },
+      toolMetadata: new Map(),
       manager: {
         close: vi.fn(async () => {
           connection = undefined;
@@ -68,6 +69,7 @@ describe("direct tools auto auth", () => {
         incrementInFlight: vi.fn(),
         decrementInFlight: vi.fn(),
       },
+      toolMetadata: new Map(),
       failureTracker: new Map(),
       ui: { setStatus: vi.fn() },
       completedUiSessions: [],
@@ -108,7 +110,7 @@ describe("direct tools auto auth", () => {
       name: "namespace.tool",
       arguments: { q: "hello" },
       _meta: { "pi-mcp-adapter/toolCallId": "id" },
-    }, { timeout: 4321 });
+    }, { timeout: 4321, onprogress: expect.any(Function), resetTimeoutOnProgress: true });
     expect(result.content[0].text).toContain("ok");
   });
 
@@ -132,6 +134,7 @@ describe("direct tools auto auth", () => {
         incrementInFlight: vi.fn(),
         decrementInFlight: vi.fn(),
       },
+      toolMetadata: new Map(),
       failureTracker: new Map(),
       completedUiSessions: [],
     } as any;
@@ -151,7 +154,7 @@ describe("direct tools auto auth", () => {
     const result = await inFlight;
 
     expect(state.manager.getRequestOptions).toHaveBeenCalledWith("demo", controller.signal);
-    expect(connection.client.callTool).toHaveBeenCalledWith({ name: "search", arguments: {}, _meta: { "pi-mcp-adapter/toolCallId": "id" } }, requestOptions);
+    expect(connection.client.callTool).toHaveBeenCalledWith({ name: "search", arguments: {}, _meta: { "pi-mcp-adapter/toolCallId": "id" } }, { ...requestOptions, onprogress: expect.any(Function), resetTimeoutOnProgress: true });
     expect(result.details).toMatchObject({ error: "aborted", server: "demo" });
     expect(result.content[0].text).toContain("request aborted");
   });
@@ -259,6 +262,7 @@ describe("direct tools auto auth", () => {
         incrementInFlight: vi.fn(),
         decrementInFlight: vi.fn(),
       },
+      toolMetadata: new Map(),
       failureTracker: new Map(),
       completedUiSessions: [],
     } as any;

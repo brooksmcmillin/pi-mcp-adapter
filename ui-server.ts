@@ -10,7 +10,7 @@ import {
 import { ContentBlockSchema } from "@modelcontextprotocol/core";
 import type { ConsentManager } from "./consent-manager.ts";
 import { ServerError, wrapError } from "./errors.ts";
-import { formatAuthRequiredMessage, normalizeToolArguments } from "./utils.ts";
+import { extractToolAnnotations, formatAuthRequiredMessage, normalizeToolArguments } from "./utils.ts";
 import { buildHostHtmlTemplate, buildSandboxResourceCsp } from "./host-html-template.ts";
 import {
   buildSandboxProxyCsp,
@@ -24,6 +24,7 @@ import type { McpExtensionState } from "./state.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery, type SessionRecoveryDeps } from "./session-recovery.ts";
 import { ensureToolCallApproved, isToolCallApprovalRequired } from "./tool-approval.ts";
 import { callToolViaTaskSession } from "./mcp-tasks.ts";
+import { callToolPausingForElicitation } from "./elicitation-handler.ts";
 import { extractUiToolVisibility, isUiToolCallableByApp, isUiToolVisibleToModel } from "./ui-tool-visibility.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import {
@@ -471,6 +472,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         } catch {
           // Preserve the endpoint's existing behavior for malformed declarations.
         }
+        const annotations = extractToolAnnotations(toolDefinition.annotations);
         const toolMeta = {
           name: callParams.name,
           originalName: callParams.name,
@@ -478,6 +480,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           ...(toolDefinition?.inputSchema !== undefined ? { inputSchema: toolDefinition.inputSchema } : {}),
           ...(uiResourceUri !== undefined ? { uiResourceUri } : {}),
           ...(uiVisibility !== undefined ? { uiVisibility } : {}),
+          ...(annotations !== undefined ? { annotations } : {}),
         };
         const approvalMetadata = new Map(options.state?.toolMetadata);
         const definition = options.config?.mcpServers[options.serverName] ?? options.state?.config.mcpServers[options.serverName];
@@ -496,41 +499,41 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
             };
           }) : []),
         ]);
-        const approval = options.state
-          ? await ensureToolCallApproved(
-              options.state,
-              options.serverName,
-              toolMeta,
-              callArgs.arguments,
-              options.state.owner?.signal,
-              "iframe",
-              approvalMetadata,
-            )
-          : options.config && isToolCallApprovalRequired(options.config, options.serverName, toolMeta, approvalMetadata)
-            ? { ok: false as const, reason: "approval_required_headless" as const }
-            : { ok: true as const };
-        if (approval.ok === false) {
-          const denied = approval.reason === "denied";
-          const message = denied
-            ? `The user declined approval to run MCP tool "${callParams.name}" on server "${options.serverName}".`
-            : `MCP tool "${callParams.name}" on server "${options.serverName}" is approval-gated and requires an interactive session.`;
-          sendJson(res, 200, {
-            ok: true,
-            result: {
-              content: [{ type: "text" as const, text: message }],
-              details: {
-                error: denied ? "approval_denied" : "approval_required",
-                server: options.serverName,
-                tool: callParams.name,
-              },
-            },
-          });
-          return;
-        }
-
         try {
+          // In flight from here so an idle check cannot close the server while the approval dialog is open.
           options.manager.touch(options.serverName);
           options.manager.incrementInFlight(options.serverName);
+          const approval = options.state
+            ? await ensureToolCallApproved(
+                options.state,
+                options.serverName,
+                toolMeta,
+                callArgs.arguments,
+                options.state.owner?.signal,
+                "iframe",
+                approvalMetadata,
+              )
+            : options.config && isToolCallApprovalRequired(options.config, options.serverName, toolMeta, approvalMetadata)
+              ? { ok: false as const, reason: "approval_required_headless" as const }
+              : { ok: true as const };
+          if (approval.ok === false) {
+            const denied = approval.reason === "denied";
+            const message = denied
+              ? `The user declined approval to run MCP tool "${callParams.name}" on server "${options.serverName}".`
+              : `MCP tool "${callParams.name}" on server "${options.serverName}" is approval-gated and requires an interactive session.`;
+            sendJson(res, 200, {
+              ok: true,
+              result: {
+                content: [{ type: "text" as const, text: message }],
+                details: {
+                  error: denied ? "approval_denied" : "approval_required",
+                  server: options.serverName,
+                  tool: callParams.name,
+                },
+              },
+            });
+            return;
+          }
           const callTool = async (conn: ServerConnection) => {
             await options.manager.ensureListen?.(options.serverName, conn);
             const requestOptions = options.manager.getRequestOptions?.(options.serverName);
@@ -542,7 +545,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
                 signal: requestOptions?.signal,
               });
             }
-            return conn.client.callTool(callArgs, requestOptions);
+            return callToolPausingForElicitation(conn.client, callArgs, requestOptions);
           };
           const result = options.config
             ? await withSessionRecovery(
@@ -658,6 +661,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       }
 
       if (url.pathname === "/proxy/ui/heartbeat") {
+        // An open page keeps its server from being idle-closed; once heartbeats stop, the normal idle timer applies.
+        options.manager.touch(options.serverName);
         sendJson(res, 200, { ok: true, result: {} });
         return;
       }

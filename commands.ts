@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createConnection } from "node:net";
+import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OverlayHandle } from "@earendil-works/pi-tui";
 import type { McpExtensionState } from "./state.ts";
@@ -11,6 +13,7 @@ import {
   type KnownServerPreset,
   type SharedConfigTarget,
   getServerProvenance,
+  loadMcpConfig,
   previewCompatibilityImports,
   previewSharedServerEntry,
   previewStarterSharedConfig,
@@ -29,7 +32,8 @@ import { supportsOAuth, authenticate, removeAuth, type McpOAuthRuntime } from ".
 import { getAuthStorageOptions, inspectAuthForUrl, type AuthStorageOptions } from "./mcp-auth.ts";
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
-import { formatTerminalError, openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
+import { findPiSignInImports, importPiSignIn } from "./pi-signin-import.ts";
+import { formatTerminalError, openPath, providerSignInMessage, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
 import { isAbortError } from "./runtime-owner.ts";
 import { resolveJevCredential } from "./jev-key-store.ts";
 import { describeProjectServerBlock } from "./project-server-trust.ts";
@@ -302,7 +306,9 @@ export async function reconnectServer(
     state.owner?.throwIfInactive();
     if (connection.status === "needs-auth") {
       if (ui) {
-        ui.notify(`MCP: ${name} requires OAuth. Run /mcp-auth ${name} first.`, "warning");
+        ui.notify(typeof definition.auth === "object"
+          ? `MCP: ${providerSignInMessage(name, definition.auth.provider)}`
+          : `MCP: ${name} requires OAuth. Run /mcp-auth ${name} first.`, "warning");
       }
       updateStatusBar(state);
       return false;
@@ -393,6 +399,11 @@ export async function authenticateServer(
     return { ok: false, message };
   }
 
+  if (typeof definition.auth === "object") {
+    const message = providerSignInMessage(serverName, definition.auth.provider);
+    ui.notify(message, "info");
+    return { ok: false, message };
+  }
   if (!supportsOAuth(definition)) {
     const message = `Server "${serverName}" does not use OAuth authentication. Set "auth": "oauth" or omit auth for auto-detection.`;
     ui.notify(
@@ -605,6 +616,21 @@ function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cw
   };
 }
 
+// Any accepted TCP connection counts as reachable; failures resolve false so the add still succeeds.
+function isLocalServerReachable(url: string, timeoutMs = 1_500): Promise<boolean> {
+  const { hostname, port } = new URL(url);
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: hostname, port: Number(port) });
+    const finish = (reachable: boolean) => {
+      socket.destroy();
+      resolve(reachable);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
 export async function openMcpSetup(
   state: McpExtensionState,
   pi: ExtensionAPI,
@@ -659,7 +685,16 @@ export async function openMcpSetup(
     addKnownServer: async (preset: KnownServerPreset, target: SharedConfigTarget) => {
       const path = writeSharedServerEntry(getSharedConfigPath(target, ctx.cwd), preset.id, preset.entry);
       configChanged = true;
-      return { path, serverName: preset.name };
+      // Merging is per field, so the entry is in effect when every preset field survives it and nothing disables it.
+      const active = loadMcpConfig(configOverridePath, ctx.cwd).mcpServers[preset.id];
+      const ignoredBecause = !active
+        ? `the current config mode doesn't read ${path}`
+        : Object.entries(preset.entry).some(([field, value]) => !isDeepStrictEqual(active[field as keyof typeof active], value))
+          ? `another config file also defines ${preset.id} and takes precedence`
+          : isServerDisabled(active) ? `another config file disables ${preset.id}` : undefined;
+      const result = { path, serverName: preset.name, ...(ignoredBecause ? { ignoredBecause } : {}) };
+      if (!preset.desktopApp) return result;
+      return { ...result, reachable: await isLocalServerReachable(preset.entry.url!) };
     },
     openPath: async (targetPath: string) => {
       await openPath(pi, targetPath);
@@ -677,7 +712,8 @@ export async function openMcpSetup(
           resolve({ configChanged });
         });
       },
-      { overlay: true, overlayOptions: { anchor: "center", width: 92 } },
+      // The panel sizes its height from tui.terminal.rows minus this margin, so it always fits.
+      { overlay: true, overlayOptions: { anchor: "center", width: 92, maxHeight: "100%", margin: { top: 1, bottom: 1 } } },
     );
   });
 }
@@ -791,6 +827,21 @@ export async function openMcpPanel(
 
   const { createMcpPanel } = await import("./mcp-panel.ts");
   let configChanged = false;
+  const authStorageOptions = state.authStorageOptions ?? {};
+  if (findPiSignInImports(config, authStorageOptions).length > 0) {
+    callbacks.importPiSignIns = () => {
+      const imported: string[] = [];
+      const failed: { server: string; error: string }[] = [];
+      for (const candidate of findPiSignInImports(config, authStorageOptions)) {
+        try {
+          if (importPiSignIn(candidate, authStorageOptions)) imported.push(candidate.serverName);
+        } catch (error) {
+          failed.push({ server: candidate.serverName, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return { imported, failed };
+    };
+  }
 
   await new Promise<void>((resolve) => {
     ctx.ui.custom(

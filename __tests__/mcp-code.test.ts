@@ -32,9 +32,9 @@ function textBlocks(result: Awaited<ReturnType<typeof runMcpScript>>): string[] 
 }
 
 describe("runMcpScript", () => {
-  it("registers mcpScript by default", () => {
+  it("registers mcpScript when scriptMode is true", () => {
     const registerTool = vi.fn();
-    createMcpAdapter({ config: { settings: {}, mcpServers: {} } })({
+    createMcpAdapter({ config: { settings: { scriptMode: true }, mcpServers: {} } })({
       registerTool,
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
@@ -45,17 +45,32 @@ describe("runMcpScript", () => {
 
     expect(registerTool).toHaveBeenCalledWith(expect.objectContaining({
       name: "mcpScript",
-      description: expect.stringContaining("multiple MCP tool calls in one request"),
+      description: expect.stringContaining("multiple MCP calls in one request"),
       promptSnippet: "Batch multiple MCP tool calls in one JavaScript request (loop, filter, chain)",
     }));
     const scriptTool = registerTool.mock.calls.find(([tool]) => tool.name === "mcpScript")?.[0];
-    expect(scriptTool.description).not.toContain("Load the mcp-scripting skill");
+    expect(scriptTool.description).not.toContain("SKILL.md");
     expect(registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "mcp_script" }));
   });
 
-  it("skips mcpScript when scriptMode is false", () => {
+  it("points mcpScript at the scripting skill when scriptSkill is model", () => {
     const registerTool = vi.fn();
-    createMcpAdapter({ config: { settings: { scriptMode: false }, mcpServers: {} } })({
+    createMcpAdapter({ config: { settings: { scriptMode: true, scriptSkill: "model" }, mcpServers: {} } })({
+      registerTool,
+      registerFlag: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      events: { on: vi.fn(), emit: vi.fn() },
+      getAllTools: vi.fn(() => []),
+    } as any);
+
+    const scriptTool = registerTool.mock.calls.find(([tool]) => tool.name === "mcpScript")?.[0];
+    expect(scriptTool.description).toContain("skills/mcp-scripting/SKILL.md");
+  });
+
+  it("skips mcpScript by default", () => {
+    const registerTool = vi.fn();
+    createMcpAdapter({ config: { settings: {}, mcpServers: {} } })({
       registerTool,
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
@@ -300,10 +315,10 @@ describe("runMcpScript", () => {
     }
   });
 
-  it("searches the script-visible tool catalog with pagination and server filtering", async () => {
+  it("searches the script-visible tool catalog with pagination, server filtering, listing, and regex", async () => {
     const result = await runMcpScript(
       state,
-      'return { first: await tools.search({ query: "fixture", limit: 1 }), second: await tools.search({ query: "fixture", limit: 1, offset: 1, server: "fixture" }), empty: await tools.search({ query: "" }) };',
+      'const paths = (page) => page.items.map((item) => item.path); return { first: await tools.search({ query: "fixture", limit: 1 }), second: await tools.search({ query: "fixture", limit: 1, offset: 1, server: "fixture" }), empty: await tools.search({ query: "" }), listed: paths(await tools.search({ query: "", server: "fixture" })), regex: paths(await tools.search({ query: "^fixture_.a", regex: true })), invalidRegex: (await tools.search({ query: "[", regex: true })).error.code };',
     );
 
     expect(JSON.parse(textBlocks(result).at(-1)!)).toEqual({
@@ -319,8 +334,50 @@ describe("runMcpScript", () => {
         hasMore: true,
         nextOffset: 2,
       },
-      empty: { items: [], total: 0, hasMore: false, nextOffset: null },
+      empty: { items: [], total: 0, hasMore: false, nextOffset: null, error: { code: "empty_query", message: "Search query cannot be empty" } },
+      listed: ["fixture_echo", "fixture_fail", "fixture_hang"],
+      regex: ["fixture_fail", "fixture_hang"],
+      invalidRegex: "invalid_pattern",
     });
+  });
+
+  it("describes and calls a tool name shared by two servers using the server search returned", async () => {
+    const sharedState: McpExtensionState = {
+      ...state,
+      // Separate definitions so each server keeps its own observed output shape.
+      config: { settings: { toolPrefix: "none" }, mcpServers: { fixture: definition, other: { ...definition } } },
+      toolMetadata: new Map([
+        ["fixture", [{ name: "echo", originalName: "echo", description: "Echo a value" }]],
+        ["other", [{ name: "echo", originalName: "echo", description: "Other echo" }]],
+      ]),
+      observedOutputs: new WeakMap(),
+    };
+
+    const result = await runMcpScript(
+      sharedState,
+      'const hits = (await tools.search({ query: "echo" })).items; const hit = hits.find((item) => item.server === "fixture"); return { servers: hits.map((item) => item.server).sort(), unscoped: (await tools.call("echo", { value: "unscoped" })).error, unknownServer: (await tools.describe({ path: "echo", server: "missing" })).error.message, described: (await tools.describe({ path: hit.path, server: hit.server })).description, called: (await tools.call(hit.path, { value: "scoped" }, { server: hit.server })).data.structuredContent, otherCalled: (await tools.call("echo", { value: 1 }, { server: "other" })).ok, target: (await tools.describe({ path: "echo", server: "other" })).observedOutput.target };',
+    );
+
+    const described = JSON.parse(textBlocks(result).at(-1)!);
+    expect(described).toEqual({
+      servers: ["fixture", "other"],
+      unscoped: { code: "ambiguous_tool", message: expect.stringContaining("tools.call(path, args, { server })") },
+      unknownServer: 'Server "missing" not found. Use the server from a tools.search hit.',
+      described: "Echo a value",
+      called: { echoed: "scoped" },
+      otherCalled: true,
+      target: '(await tools.call("echo", args, { server: "other" })).data.structuredContent',
+    });
+
+    // The copied target reaches "other": its observed shape gains the boolean, while "fixture" keeps its own.
+    const copied = await runMcpScript(sharedState, `const args = { value: true }; return ${described.target};`);
+    expect(JSON.parse(textBlocks(copied).at(-1)!)).toEqual({ echoed: true });
+
+    const empty = await runMcpScript(sharedState,
+      'await tools.call("echo", { value: "a" }, { server: "fixture" }); await tools.call("echo", { value: 2 }, { server: "other" }); return [];');
+    const text = textBlocks(empty).join("\n");
+    expect(text).toContain('(await tools.call("echo", args, { server: "fixture" })).data.structuredContent is:\n{ echoed: string; }');
+    expect(text).toContain('(await tools.call("echo", args, { server: "other" })).data.structuredContent is:\n{ echoed: number | boolean; }');
   });
 
   it("keeps inputs without field documentation compact and suggests corrections without throwing", async () => {
@@ -391,6 +448,25 @@ describe("runMcpScript", () => {
     expect(search.items).toEqual([{ path: "fixture_icon", name: "icon", server: "fixture", score: expect.any(Number) }]);
   });
 
+  it("describes the observed output of a schemaless tool at its path in the call envelope", async () => {
+    const result = await runMcpScript({ ...state, observedOutputs: new WeakMap() },
+      'await tools.fixture_echo({ value: "hidden" }); return (await tools.describe({ path: "fixture_echo" })).observedOutput;');
+    expect(JSON.parse(textBlocks(result).at(-1)!)).toEqual({
+      target: '(await tools.call("fixture_echo", args)).data.structuredContent',
+      typeScript: "{ echoed: string; }",
+    });
+  });
+
+  it("lists the fields seen when a script finds nothing, and not when it returns data", async () => {
+    const empty = await runMcpScript({ ...state, observedOutputs: new WeakMap() },
+      'const result = await tools.fixture_echo({ value: "hidden" }); return result.data.structuredContent.items ?? [];');
+    expect(textBlocks(empty).join("\n")).toContain('(await tools.call("fixture_echo", args)).data.structuredContent is:\n{ echoed: string; }]');
+
+    const found = await runMcpScript({ ...state, observedOutputs: new WeakMap() },
+      'const result = await tools.fixture_echo({ value: "hidden" }); return result.data.structuredContent.echoed;');
+    expect(textBlocks(found).join("\n")).not.toContain("Result fields seen");
+  });
+
   it("keeps active failed-backoff tools out of script describe results", async () => {
     const backoffState = {
       ...state,
@@ -408,8 +484,8 @@ describe("runMcpScript", () => {
       describe: {
         path: "fixture_echo",
         error: {
-          code: "tool_not_found",
-          message: "Tool not found: fixture_echo",
+          code: "server_backoff",
+          message: expect.stringContaining('Server "fixture" not available'),
           suggestions: [],
         },
       },
@@ -646,19 +722,37 @@ return await tools.call("fixture_echo", { value: first.data.structuredContent.ec
   });
 
   it("keeps in-flight calls in the trace when the script times out", async () => {
-    const result = await runMcpScript(
-      state,
-      'await tools.fixture_echo({ value: "done" }); await tools.fixture_hang({});',
-      300,
-    );
-
-    expect(result.details).toMatchObject({
-      error: "timeout",
-      calls: [
-        { path: "fixture_echo", ok: true },
-        { path: "fixture_hang", ok: false, error: "incomplete" },
-      ],
+    // The deadline also covers worker startup, so it only fires once the hanging call is in flight.
+    const client = manager.getConnection("fixture")!.client;
+    const callTool = client.callTool.bind(client);
+    let hangStarted!: () => void;
+    const hanging = new Promise<void>(resolve => { hangStarted = resolve; });
+    const spy = vi.spyOn(client, "callTool").mockImplementation((params, ...rest) => {
+      if (params.name === "hang") hangStarted();
+      return callTool(params, ...rest);
     });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const run = runMcpScript(
+        state,
+        'await tools.fixture_echo({ value: "done" }); await tools.fixture_hang({});',
+        300,
+      );
+      await Promise.race([hanging, run]);
+      await vi.advanceTimersByTimeAsync(300);
+      const result = await run;
+
+      expect(result.details).toMatchObject({
+        error: "timeout",
+        calls: [
+          { path: "fixture_echo", ok: true },
+          { path: "fixture_hang", ok: false, error: "incomplete" },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+      spy.mockRestore();
+    }
   });
 
   it("returns promptly on early return and marks un-awaited calls incomplete", async () => {

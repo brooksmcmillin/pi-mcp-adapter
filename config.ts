@@ -10,8 +10,8 @@ import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPl
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
 import { validateJevSettings } from "./jev-client.ts";
-import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
-import { parseJsonWithComments, stripUtf8Bom, toStringRecord } from "./utils.ts";
+import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type OAuthConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
+import { getMissingEnvVars, parseJsonWithComments, providerAuthUrlError, stripUtf8Bom, toStringRecord } from "./utils.ts";
 
 const GENERIC_GLOBAL_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
 const AGENTS_GLOBAL_CONFIG_PATHS = [
@@ -31,6 +31,8 @@ export interface KnownServerPreset {
   name: string;
   summary: string;
   entry: ServerEntry;
+  /** Offered only when one of these app paths exists; the local server is probed after adding. */
+  desktopApp?: { paths: readonly string[]; enableSteps: string };
 }
 
 export const KNOWN_SERVER_PRESETS: readonly KnownServerPreset[] = [
@@ -57,14 +59,14 @@ export const KNOWN_SERVER_PRESETS: readonly KnownServerPreset[] = [
     },
   },
   {
-    id: "serply",
-    name: "Serply",
-    summary: "Search Google, News, and Scholar and fetch pages with SERPLY_API_KEY.",
+    id: "tavily-search",
+    name: "Tavily Search",
+    summary: "Search the web and extract page content without an API key.",
     entry: {
-      url: "https://api.serply.io/mcp",
-      headers: { "X-Api-Key": "${SERPLY_API_KEY}" },
+      url: "https://mcp.tavily.com/mcp/",
+      headers: { "X-Tavily-Access-Mode": "keyless" },
       protocolVersion: "auto",
-      directTools: ["google_search", "google_news_search", "google_scholar_search", "scrape_url"],
+      directTools: ["tavily_search", "tavily_extract"],
     },
   },
   {
@@ -84,6 +86,20 @@ export const KNOWN_SERVER_PRESETS: readonly KnownServerPreset[] = [
     name: "Chrome DevTools",
     summary: "Inspect and automate a local Chrome browser.",
     entry: { command: "npx", args: ["-y", "chrome-devtools-mcp@1.6.0"] },
+  },
+  {
+    id: "figma",
+    name: "Figma (desktop)",
+    summary: "Read designs through the Figma desktop app. Needs a Dev or Full seat on a paid Figma plan.",
+    entry: { url: "http://127.0.0.1:3845/mcp", protocolVersion: "auto" },
+    desktopApp: {
+      paths: [
+        "/Applications/Figma.app",
+        join(homedir(), "Applications", "Figma.app"),
+        join(homedir(), "AppData", "Local", "Figma", "Figma.exe"),
+      ],
+      enableSteps: "To enable it, open a Design file in Figma, switch to Dev Mode (Shift+D), and click 'Enable desktop MCP server' in the inspect panel.",
+    },
   },
 ];
 
@@ -108,7 +124,7 @@ const IMPORT_PATHS: Record<ImportKind, string[]> = {
 };
 
 interface ConfigSourceSpec {
-  id: "shared-global" | "agents-global" | "agents-nested-global" | "pi-global" | "shared-project-ancestor" | "pi-project-ancestor" | "shared-project" | "pi-project";
+  id: "shared-global" | "agents-global" | "agents-nested-global" | "pi-mcp-global" | "pi-global" | "shared-project-ancestor" | "pi-project-ancestor" | "shared-project" | "pi-mcp-project" | "pi-project";
   label: string;
   readPath: string;
   writePath: string;
@@ -173,6 +189,7 @@ export interface McpDiscoverySummary {
   totalServerCount: number;
   fingerprint: string;
   repoPrompt: RepoPromptDiscovery;
+  knownServerPresets: readonly KnownServerPreset[];
 }
 
 export interface McpStandardConfigSummary {
@@ -196,8 +213,13 @@ export function getPiGlobalConfigPath(overridePath?: string): string {
   return overridePath ? resolve(overridePath) : getAgentPath(ADAPTER_CONFIG_NAME);
 }
 
-export function getLegacyPiMcpGlobalConfigPath(): string {
+export function getPiMcpGlobalConfigPath(): string {
   return getAgentPath(PI_MCP_CONFIG_NAME);
+}
+
+/** @internal Pi's built-in MCP stores OAuth sign-ins here, keyed by `String(new URL(serverUrl))`. */
+export function getPiMcpAuthPath(): string {
+  return getAgentPath("mcp-auth.json");
 }
 
 export function getGenericGlobalConfigPath(): string {
@@ -212,22 +234,30 @@ export function getProjectPiConfigPath(cwd = process.cwd()): string {
   return resolve(cwd, getConfigDirName(), ADAPTER_CONFIG_NAME);
 }
 
-export function getLegacyProjectPiMcpConfigPath(cwd = process.cwd()): string {
+export function getProjectPiMcpConfigPath(cwd = process.cwd()): string {
   return resolve(cwd, getConfigDirName(), PI_MCP_CONFIG_NAME);
 }
 
-/**
- * Adapter-only content in a legacy Pi `mcp.json`. Once Pi's built-in MCP owns the file, its
- * `mcpServers` belong to Pi; `settings`, `imports`, `claudePlugins`, and the legacy
- * `mcp-servers` key are read by neither, so they still need moving.
- */
-function legacyMcpConfigHasContent(filePath: string, piOwnsServers: boolean): boolean {
+let piMcpConfigEnabled = false;
+
+/** @internal Set once by the extension on Pi 0.99+, so every loader in the process agrees. */
+export function setPiMcpConfigEnabled(enabled: boolean): void {
+  piMcpConfigEnabled = enabled;
+}
+
+/** @internal */
+export function isPiMcpConfigEnabled(): boolean {
+  return piMcpConfigEnabled;
+}
+
+/** Adapter content in an old adapter `mcp.json` on Pi versions without their own MCP config. */
+function legacyMcpConfigHasContent(filePath: string): boolean {
   if (!existsSync(filePath)) return false;
   try {
     const raw = parseJsonWithComments(readFileSync(filePath, "utf-8"));
     if (!isRecord(raw)) return false;
     const hasServers = (value: unknown) => isRecord(value) && Object.keys(value).length > 0;
-    return (!piOwnsServers && hasServers(raw.mcpServers))
+    return hasServers(raw.mcpServers)
       || hasServers(raw["mcp-servers"])
       || raw.settings !== undefined
       || raw.imports !== undefined
@@ -237,18 +267,32 @@ function legacyMcpConfigHasContent(filePath: string, piOwnsServers: boolean): bo
   }
 }
 
-export function getLegacyMcpMigrationNotices(cwd = process.cwd(), overridePath?: string, piOwnsServers = false): string[] {
+export function getLegacyMcpMigrationNotices(cwd = process.cwd(), overridePath?: string): string[] {
+  if (piMcpConfigEnabled) {
+    return getConfigSources(overridePath, cwd).flatMap((source) => {
+      const file = isPiMcpSource(source.id) ? readPiMcpConfig(source.readPath) : null;
+      if (!file) return [];
+      const parts: string[] = [];
+      if (file.adapterKeys.length > 0) {
+        const serversHint = file.adapterKeys.includes("mcp-servers") ? `, with "mcp-servers" entries under its "mcpServers" key` : "";
+        parts.push(`pi-mcp-adapter does not read ${file.adapterKeys.join(", ")} in this file; move them into ${source.writePath}${serversHint}.`);
+      }
+      if (file.skipped.length > 0) parts.push(`Skipped ${file.skipped.join("; ")}.`);
+      if (file.ignoredSettings.size > 0) {
+        const ignored = [...file.ignoredSettings].map(([name, settings]) => `"${name}": ${settings.join(", ")}`);
+        parts.push(`Ignored settings (details in /mcp-adapter): ${ignored.join("; ")}.`);
+      }
+      return parts.length > 0 ? [`${source.readPath}: ${parts.join(" ")}`] : [];
+    });
+  }
   const explicitPath = overridePath ? resolve(overridePath) : undefined;
   const candidates = [
-    [getLegacyPiMcpGlobalConfigPath(), getPiGlobalConfigPath()],
-    [getLegacyProjectPiMcpConfigPath(cwd), getProjectPiConfigPath(cwd)],
+    [getPiMcpGlobalConfigPath(), getPiGlobalConfigPath()],
+    [getProjectPiMcpConfigPath(cwd), getProjectPiConfigPath(cwd)],
   ] as const;
   return candidates.flatMap(([source, target]) => {
     // An explicitly selected config is loaded verbatim, whatever its name.
-    if (resolve(source) === explicitPath || !legacyMcpConfigHasContent(source, piOwnsServers)) return [];
-    if (piOwnsServers) {
-      return [`${source} contains pi-mcp-adapter settings that neither Pi nor the adapter reads. Move settings, imports, and claudePlugins into ${target}, and put any "mcp-servers" entries under its "mcpServers" key.`];
-    }
+    if (resolve(source) === explicitPath || !legacyMcpConfigHasContent(source)) return [];
     const fix = existsSync(target)
       ? `Merge ${source} into ${target}, then remove ${source}.`
       : `Move it with: mv ${JSON.stringify(source)} ${JSON.stringify(target)}`;
@@ -284,7 +328,7 @@ export function findAvailableImportConfigs(cwd = process.cwd()): DiscoveredImpor
 
 function getConfigSourceSummaries(sourceSpecs: ConfigSourceSpec[]): ConfigDiscoverySource[] {
   return sourceSpecs.map((source) => {
-    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const loaded = readSourceConfig(source.id, source.readPath);
     return {
       id: source.id,
       label: source.label,
@@ -371,6 +415,7 @@ export function getMcpDiscoverySummary(
     ...summaryWithoutRepoPrompt,
     fingerprint,
     repoPrompt: detectRepoPrompt(summaryWithoutRepoPrompt, cwd),
+    knownServerPresets: KNOWN_SERVER_PRESETS.filter(({ desktopApp }) => !desktopApp || desktopApp.paths.some((path) => existsSync(path))),
   };
 }
 
@@ -433,9 +478,15 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
     if (source.scope === "project") projectServers.set(name, { path: source.path });
   }
 
+  const piProjectSource = sourceSpecs.find((source) => source.id === "pi-mcp-project");
+  const piProjectNames = Object.keys((piProjectSource && readPiMcpConfig(piProjectSource.readPath))?.mcpServers ?? {});
   for (const source of sourceSpecs) {
-    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const loaded = readSourceConfig(source.id, source.readPath);
     if (!loaded) continue;
+    // Pi replaces a global entry that the project file redefines; mergeServerMaps would merge fields.
+    if (source.id === "pi-mcp-global") {
+      for (const name of piProjectNames) delete loaded.mcpServers[name];
+    }
     const expandedImport = expandImports(loaded, cwd);
     const expanded = expandedImport.config;
     const sourceRef = { path: source.readPath };
@@ -463,7 +514,7 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
   }
 
   if (isExclusiveConfigMode()) {
-    return { config: resolveConfiguredClaudePluginMcp(config, cwd), projectServers, projectServerPolicy };
+    return { config: stripProjectProviderAuth(resolveConfiguredClaudePluginMcp(config, cwd), projectServers), projectServers, projectServerPolicy };
   }
 
   const packageConfig = loadPackageMcpConfigs(cwd);
@@ -488,10 +539,23 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
     for (const name of claudePluginServers) projectServers.set(name, projectClaudePluginSource);
   }
   return {
-    config: mergedConfig,
+    config: stripProjectProviderAuth(mergedConfig, projectServers),
     projectServers,
     projectServerPolicy,
   };
+}
+
+/** Pi provider tokens go only to servers from user-global config; Pi forbids `auth` in project files too. */
+function stripProjectProviderAuth(config: McpConfig, projectServers: Map<string, ProjectServerSource>): McpConfig {
+  const stripped = [...projectServers.keys()].filter((name) => typeof config.mcpServers[name]?.auth === "object");
+  if (stripped.length === 0) return config;
+  const mcpServers = { ...config.mcpServers };
+  for (const name of stripped) {
+    delete mcpServers[name];
+    projectServers.delete(name);
+  }
+  console.warn(`Ignoring MCP servers ${stripped.map((name) => `"${name}"`).join(", ")}: auth.provider is only allowed in user-global config, and project config defines or overrides them`);
+  return { ...config, mcpServers };
 }
 
 export function resolveConfiguredClaudePluginMcp(config: McpConfig, cwd = process.cwd()): McpConfig {
@@ -533,7 +597,7 @@ function applySettingDefaults(config: McpConfig): McpConfig {
 function getMergedSettings(overridePath?: string, cwd = process.cwd()): McpSettings | undefined {
   let settings: McpSettings | undefined;
   for (const source of getConfigSources(overridePath, cwd)) {
-    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const loaded = readSourceConfig(source.id, source.readPath);
     if (loaded?.settings) settings = { ...settings, ...loaded.settings };
   }
   return settings;
@@ -587,7 +651,7 @@ function getConfigConflicts(
     }
   }
   for (const source of sourceSpecs) {
-    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const loaded = readSourceConfig(source.id, source.readPath);
     if (!loaded) continue;
     if (loaded.imports?.length) {
       for (const importKind of loaded.imports) {
@@ -657,6 +721,20 @@ function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSou
     });
   }
 
+  const piMcpGlobalPath = getPiMcpGlobalConfigPath();
+  if (piMcpConfigEnabled && piMcpGlobalPath !== userPath && !sources.some((source) => source.readPath === piMcpGlobalPath)) {
+    sources.push({
+      id: "pi-mcp-global",
+      label: "user-global Pi MCP",
+      readPath: piMcpGlobalPath,
+      writePath: userPath,
+      kind: "import",
+      importKind: "Pi mcp.json",
+      shared: true,
+      scope: "global",
+    });
+  }
+
   sources.push({
     id: "pi-global",
     label: "MCP adapter global override",
@@ -669,10 +747,12 @@ function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSou
 
   // Compare file identities so symlink aliases cannot reload a global source
   // at ancestor precedence. Keep original paths for display and writes.
+  const projectPiMcpPath = getProjectPiMcpConfigPath(cwd);
   const reservedPaths = new Set([
     ...sources.map((source) => getConfigPathIdentity(source.readPath)),
     getConfigPathIdentity(projectPath),
     getConfigPathIdentity(projectPiPath),
+    ...(piMcpConfigEnabled ? [getConfigPathIdentity(projectPiMcpPath)] : []),
   ]);
   // Only user-global files (including an explicit override) may opt in to
   // ancestor discovery. Project files cannot extend this trust boundary.
@@ -716,6 +796,20 @@ function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSou
     });
   }
 
+  // Pi reads `.pi/mcp.json` only in the cwd, so it is not part of ancestor discovery.
+  if (piMcpConfigEnabled && projectPiMcpPath !== userPath && projectPiMcpPath !== piMcpGlobalPath) {
+    sources.push({
+      id: "pi-mcp-project",
+      label: "project Pi MCP",
+      readPath: projectPiMcpPath,
+      writePath: projectPiPath,
+      kind: "import",
+      importKind: "Pi project mcp.json",
+      shared: true,
+      scope: "project",
+    });
+  }
+
   if (projectPiPath !== userPath && projectPiPath !== projectPath) {
     sources.push({
       id: "pi-project",
@@ -748,7 +842,7 @@ function isWithin(base: string, target: string): boolean {
 function getConfiguredAncestorRoot(globalSources: ConfigSourceSpec[], cwd: string): string | undefined {
   let configured: unknown;
   for (const source of globalSources) {
-    const roots = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`)?.settings?.ancestorConfigRoots;
+    const roots = readSourceConfig(source.id, source.readPath)?.settings?.ancestorConfigRoots;
     if (roots !== undefined) configured = roots;
   }
   if (configured === undefined || (Array.isArray(configured) && configured.length === 0)) return undefined;
@@ -864,6 +958,8 @@ function mergeServerMaps(
       for (const field of URL_BOUND_AUTH_FIELDS) {
         delete baseEntry[field];
       }
+      // A provider token is bound to the url that asked for it, like the fields above.
+      if (typeof baseEntry.auth === "object") delete baseEntry.auth;
       if (baseEntry.oauth !== false) {
         delete baseEntry.oauth;
       }
@@ -1042,6 +1138,159 @@ function readValidatedConfig(path: string, label: string): McpConfig | null {
   }
 }
 
+function isPiMcpSource(id: ConfigSourceSpec["id"]): boolean {
+  return id === "pi-mcp-global" || id === "pi-mcp-project";
+}
+
+function readSourceConfig(id: ConfigSourceSpec["id"], path: string): (McpConfig & { ignoredSettings?: Map<string, string[]> }) | null {
+  return isPiMcpSource(id) ? readPiMcpConfig(path) : readValidatedConfig(path, `MCP config from ${path}`);
+}
+
+interface PiMcpConfigFile {
+  mcpServers: Record<string, ServerEntry>;
+  /** Top-level keys of old adapter configs, which only mcp-adapter.json reads. */
+  adapterKeys: string[];
+  skipped: string[];
+  ignoredSettings: Map<string, string[]>;
+}
+
+const PI_MCP_EXPOSURES = ["codemode", "codemode-deferred", "deferred", "direct", "hidden"];
+
+/** Pi's top-level `autoEnableCodemode` has no adapter equivalent and is ignored. */
+function readPiMcpConfig(path: string): PiMcpConfigFile | null {
+  if (!existsSync(path)) return null;
+  let raw: Record<string, unknown>;
+  try {
+    const text = readFileSync(path, "utf-8");
+    if (stripJsonComments(text, { trailingCommas: true }).trim() === "") return null;
+    const parsed = parseJsonWithComments(text);
+    if (!isRecord(parsed) || (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers))) {
+      throw new Error('expected an object with an "mcpServers" object');
+    }
+    raw = parsed;
+  } catch (error) {
+    console.warn(`Failed to load Pi MCP config from ${path}:`, error);
+    return null;
+  }
+  const file: PiMcpConfigFile = {
+    mcpServers: {},
+    adapterKeys: ["settings", "imports", "claudePlugins", "mcp-servers"].filter((key) => raw[key] !== undefined),
+    skipped: [],
+    ignoredSettings: new Map(),
+  };
+  for (const [name, value] of Object.entries((raw.mcpServers ?? {}) as Record<string, unknown>)) {
+    const translated = translatePiMcpServer(name, value);
+    if (typeof translated === "string") {
+      file.skipped.push(`"${name}" (${translated})`);
+      continue;
+    }
+    file.mcpServers[name] = translated.entry;
+    if (translated.ignored.length > 0) file.ignoredSettings.set(name, translated.ignored);
+  }
+  return file;
+}
+
+/** Returns why the entry is skipped when Pi would reject it or the adapter can't run it. */
+export function translatePiMcpServer(name: string, value: unknown): { entry: ServerEntry; ignored: string[] } | string {
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return 'invalid server name (use letters, digits, "_" and "-")';
+  if (!isRecord(value)) return "must be an object";
+  const { type, command, args, env, cwd, url, headers, oauth, exposure, toolExposure, enabled, timeout, auth, description, ...unknown } = value;
+  const isExposure = (candidate: unknown) => typeof candidate === "string" && PI_MCP_EXPOSURES.includes(candidate);
+  if (exposure !== undefined && !isExposure(exposure)) return `exposure must be one of ${PI_MCP_EXPOSURES.join(", ")}`;
+  if (toolExposure !== undefined && (!isRecord(toolExposure) || !Object.values(toolExposure).every(isExposure))) {
+    return `toolExposure must map tool names to one of ${PI_MCP_EXPOSURES.join(", ")}`;
+  }
+  if (enabled !== undefined && typeof enabled !== "boolean") return "enabled must be a boolean";
+  if (timeout !== undefined && (typeof timeout !== "number" || !(timeout > 0))) return "timeout must be a positive number of seconds";
+  if (description !== undefined && typeof description !== "string") return "description must be a string";
+  if (type === "sse") return "legacy SSE transport is not supported; use the streamable HTTP URL";
+  const ignored = Object.keys(unknown);
+
+  let entry: ServerEntry;
+  let otherTransportKeys: string[];
+  if (typeof url === "string" && (type === undefined || type === "http" || type === "streamable-http")) {
+    if (!URL.canParse(url) || !/^https?:$/.test(new URL(url).protocol)) return "url must be an http or https URL";
+    if (headers !== undefined && !isStringRecord(headers)) return "headers must map names to strings";
+    const translatedOAuth = oauth === undefined ? undefined : translatePiOAuth(oauth);
+    if (typeof translatedOAuth === "string") return translatedOAuth;
+    entry = { url, ...(headers !== undefined ? { headers } : {}), ...(translatedOAuth ? { oauth: translatedOAuth.oauth } : {}) };
+    if (auth !== undefined) {
+      if (!isRecord(auth) || typeof auth.provider !== "string" || !auth.provider) return "auth.provider must be a provider name";
+      const urlError = providerAuthUrlError(url);
+      if (urlError) return urlError;
+      entry.auth = { provider: auth.provider };
+    }
+    ignored.push(...translatedOAuth?.ignored ?? []);
+    otherTransportKeys = ["command", "args", "env", "cwd"];
+  } else if (typeof command === "string" && (type === undefined || type === "stdio")) {
+    if (args !== undefined && !(Array.isArray(args) && args.every((arg) => typeof arg === "string"))) return "args must be an array of strings";
+    if (env !== undefined && !isStringRecord(env)) return "env must map names to strings";
+    if (cwd !== undefined && typeof cwd !== "string") return "cwd must be a string";
+    entry = {
+      command,
+      ...(args !== undefined ? { args: args as string[] } : {}),
+      ...(env !== undefined ? { env } : {}),
+      ...(cwd !== undefined ? { cwd } : {}),
+    };
+    otherTransportKeys = ["url", "headers", "oauth", "auth"];
+  } else {
+    return 'needs either "command" (stdio) or "url" (streamable HTTP)';
+  }
+  ignored.push(...otherTransportKeys.filter((key) => value[key] !== undefined));
+  if (description !== undefined) entry.description = description;
+
+  // `codemode-deferred` is an alias of `codemode` since Pi 0.99.2; both are proxy-only here.
+  const serverExposure = exposure === undefined || exposure === "codemode-deferred" ? "codemode" : exposure;
+  if (enabled === false || serverExposure === "hidden") entry.disabled = true;
+  if (serverExposure === "direct") entry.directTools = true;
+  if (serverExposure === "deferred") entry.directTools = "search";
+  if (timeout !== undefined) entry.requestTimeoutMs = Math.round(timeout * 1000);
+
+  // excludeTools matches a superset of Pi's hidden entries (prefixed names, aliases, `?` as a
+  // wildcard), so it never exposes a tool Pi hides.
+  const directTools: string[] = [];
+  const excludeTools: string[] = [];
+  for (const [tool, rawValue] of Object.entries(toolExposure ?? {})) {
+    const toolValue = rawValue === "codemode-deferred" ? "codemode" : rawValue;
+    if (toolValue === serverExposure) continue;
+    if (toolValue === "hidden") excludeTools.push(tool);
+    else if (toolValue === "direct" && !tool.includes("*") && serverExposure === "codemode") directTools.push(tool);
+    else ignored.push(`toolExposure ${JSON.stringify(tool)}: ${toolValue}`);
+  }
+  if (directTools.length > 0) entry.directTools = directTools;
+  if (excludeTools.length > 0) entry.excludeTools = excludeTools;
+  return { entry, ignored };
+}
+
+function translatePiOAuth(oauth: unknown): { oauth: OAuthConfig; ignored: string[] } | string {
+  if (!isRecord(oauth)) return "oauth must be an object";
+  const { clientId, clientSecret, scope, clientName, callbackPort, callbackUrl, ...unknown } = oauth;
+  const copied = { clientId, clientSecret, scope, clientName };
+  for (const [key, field] of Object.entries(copied)) {
+    if (field !== undefined && (typeof field !== "string" || (key === "clientName" && !field.trim()))) {
+      return `oauth.${key} must be a ${key === "clientName" ? "non-empty " : ""}string`;
+    }
+  }
+  if (callbackPort !== undefined && (typeof callbackPort !== "number" || !Number.isInteger(callbackPort) || callbackPort < 1 || callbackPort > 65535)) {
+    return "oauth.callbackPort must be a port number";
+  }
+  const result = Object.fromEntries(Object.entries(copied).filter(([, field]) => field !== undefined)) as OAuthConfig;
+  if (callbackUrl !== undefined) {
+    const parsed = typeof callbackUrl === "string" && URL.canParse(callbackUrl) ? new URL(callbackUrl) : undefined;
+    if (!parsed || parsed.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || parsed.search !== "" || parsed.hash !== "") {
+      return "oauth.callbackUrl must be an http URI on localhost, 127.0.0.1, or [::1] without query or fragment";
+    }
+    if (parsed.port && callbackPort !== undefined && Number(parsed.port) !== callbackPort) {
+      return "oauth.callbackUrl and oauth.callbackPort name different ports";
+    }
+    // Pi sends a URI with a port as written; without one it adds callbackPort or a free port.
+    result.redirectUri = parsed.port ? callbackUrl as string : `http://${parsed.hostname}:${callbackPort ?? "{port}"}${parsed.pathname}`;
+  } else if (callbackPort !== undefined) {
+    result.redirectUri = `http://127.0.0.1:${callbackPort}/callback`;
+  }
+  return { oauth: result, ignored: Object.keys(unknown).map((key) => `oauth.${key}`) };
+}
+
 function validateConfig(raw: unknown): McpConfig {
   if (!isRecord(raw)) {
     return { mcpServers: {} };
@@ -1098,7 +1347,27 @@ function toServerEntries(servers: unknown): Record<string, ServerEntry> {
   if (!isRecord(servers)) return {};
   const entries: Record<string, ServerEntry> = {};
   for (const [name, entry] of Object.entries(servers)) {
-    if (isServerEntry(entry)) entries[name] = entry;
+    if (!isServerEntry(entry)) continue;
+    const auth: unknown = entry.auth;
+    if (typeof auth === "object") {
+      const provider = isRecord(auth) ? auth.provider : undefined;
+      const error = typeof provider !== "string" || !provider ? "auth.provider must be a provider name"
+        : typeof entry.url !== "string" ? "auth.provider requires a url"
+        // A URL with env references is checked once resolved, when it connects.
+        : getMissingEnvVars(entry.url, {}).length > 0 ? undefined
+        : providerAuthUrlError(entry.url);
+      if (error) {
+        console.warn(`Ignoring MCP server "${name}": ${error}`);
+        continue;
+      }
+    }
+    if (entry.description !== undefined && typeof entry.description !== "string") {
+      console.warn(`Ignoring invalid description for MCP server "${name}": expected a string`);
+      const { description: _description, ...rest } = entry;
+      entries[name] = rest;
+      continue;
+    }
+    entries[name] = entry;
   }
   return entries;
 }
@@ -1109,6 +1378,10 @@ function isServerEntry(value: unknown): value is ServerEntry {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
 }
 
 function mergeOpenCodeConfigs(base: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown> {
@@ -1279,7 +1552,7 @@ function extractServers(config: unknown, kind: ImportKind): Record<string, Serve
     mappedServers[name] = mapped as ServerEntry;
   }
 
-  return mappedServers;
+  return toServerEntries(mappedServers);
 }
 
 function serializeRawConfig(raw: Record<string, unknown>): string {
@@ -1479,7 +1752,7 @@ export function writeProjectServerDisabledOverride(
     let lowerConfig: McpConfig = { mcpServers: {} };
     for (const source of getConfigSources(overridePath, cwd)) {
       if (source.readPath === filePath) continue;
-      const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+      const loaded = readSourceConfig(source.id, source.readPath);
       if (loaded) lowerConfig = mergeConfigs(lowerConfig, expandImports(loaded, cwd).config);
     }
     if (raw.imports !== undefined) {
@@ -1542,10 +1815,10 @@ function buildRepoPromptEntry(executablePath: string): ServerEntry {
   };
 }
 
-function detectRepoPrompt(summary: Omit<McpDiscoverySummary, "fingerprint" | "repoPrompt">, cwd = process.cwd()): RepoPromptDiscovery {
+function detectRepoPrompt(summary: Omit<McpDiscoverySummary, "fingerprint" | "repoPrompt" | "knownServerPresets">, cwd = process.cwd()): RepoPromptDiscovery {
   for (const source of summary.sources) {
     if (source.kind !== "shared" || source.serverCount === 0) continue;
-    const config = readValidatedConfig(source.path, `MCP config from ${source.path}`);
+    const config = readSourceConfig(source.id, source.path);
     if (!config) continue;
     for (const [name, entry] of Object.entries(config.mcpServers)) {
       if (isRepoPromptServer(name, entry)) {
@@ -1665,9 +1938,8 @@ export function getServerProvenance(overridePath?: string, cwd = process.cwd()):
   }
 
   for (const source of getConfigSources(overridePath, cwd)) {
-    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const loaded = readSourceConfig(source.id, source.readPath);
     if (!loaded) continue;
-
     if (loaded.imports?.length) {
       for (const importKind of loaded.imports) {
         const imported = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
@@ -1683,10 +1955,13 @@ export function getServerProvenance(overridePath?: string, cwd = process.cwd()):
     }
 
     for (const name of Object.keys(loaded.mcpServers)) {
+      // A Pi entry brings its own list; other sources keep the one from the Pi entry below them.
+      const ignoredSettings = loaded.ignoredSettings ? loaded.ignoredSettings.get(name) : provenance.get(name)?.ignoredSettings;
       provenance.set(name, {
         path: source.writePath,
         kind: source.kind,
         ...(source.importKind !== undefined ? { importKind: source.importKind } : {}),
+        ...(ignoredSettings !== undefined ? { ignoredSettings } : {}),
       });
     }
   }

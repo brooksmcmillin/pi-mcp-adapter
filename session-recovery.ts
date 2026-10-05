@@ -109,8 +109,8 @@ export async function withSessionRecovery<T>(
     return await fn(connection);
   } catch (err) {
     const definition = deps.config.mcpServers[serverName];
-    if (definition && supportsOAuth(definition)
-      && (err instanceof UnauthorizedError || (err instanceof SdkHttpError && err.status === 401))) {
+    const unauthorized = err instanceof UnauthorizedError || (err instanceof SdkHttpError && err.status === 401);
+    if (definition && supportsOAuth(definition) && unauthorized) {
       const authStorageOptions = deps.manager.getAuthStorageOptions?.();
       if (authStorageOptions) {
         invalidateAuthEntryCache(serverName, authStorageOptions);
@@ -118,7 +118,8 @@ export async function withSessionRecovery<T>(
         invalidateAuthEntryCache(serverName);
       }
     }
-    if (!isTerminatedSession(err, hadSessionId)) {
+    // A provider token rejected or gone reconnects, which ends in needs-auth when Pi has no token.
+    if (!isTerminatedSession(err, hadSessionId) && !(unauthorized && typeof definition?.auth === "object")) {
       throw err;
     }
 
