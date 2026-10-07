@@ -698,6 +698,55 @@ describe("proxy discovery", () => {
     expect(missingTool.content[0].text).toContain('mcp({ search: "...", server: "demo" })');
   });
 
+  it("suggests the unique exact owner without dispatching to it", async () => {
+    const state = createState();
+    state.config.mcpServers.other = { command: "npx", args: ["other"] };
+    state.toolMetadata.set("other", [{ name: "other_search", originalName: "search", description: "Search elsewhere" }]);
+    const callTool = vi.fn();
+    state.manager.getConnection = () => ({ status: "connected", tools: [], resources: [], client: { callTool } }) as any;
+    state.manager.ensureListen = vi.fn();
+
+    const result = await executeCall(state, "other_search", {}, "demo");
+
+    expect(result.details).toMatchObject({
+      error: "tool_not_found",
+      ownerCandidates: [{ server: "other", tool: "other_search" }],
+    });
+    expect(result.content[0].text).toContain('Known owner for tool "other_search"');
+    expect(result.content[0].text).toContain('mcp({ tool: "other_search", server: "other" })');
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it("reports collisions and keeps discovery results server-qualified", async () => {
+    const state = createState();
+    state.config.mcpServers.other = { command: "npx", args: ["other"] };
+    state.config.mcpServers.third = { command: "npx", args: ["third"] };
+    state.toolMetadata.set("other", [{ name: "other_search", originalName: "search", description: "Search elsewhere" }]);
+    state.toolMetadata.set("third", [{ name: "other_search", originalName: "other_search", description: "Search again" }]);
+    const callTool = vi.fn();
+    state.manager.getConnection = () => ({ status: "connected", tools: [], resources: [], client: { callTool } }) as any;
+    state.manager.ensureListen = vi.fn();
+
+    const missing = executeDescribe(state, "other_search", "demo");
+    expect(missing.details).toMatchObject({ error: "tool_not_found", ownerCandidates: [
+      { server: "other", tool: "other_search" },
+      { server: "third", tool: "other_search" },
+    ] });
+    expect(missing.content[0].text).toContain("Ambiguous:");
+    const found = executeSearch(state, "search");
+    expect(found.content[0].text).toContain('Server: demo; call: mcp({ tool: "demo_search", server: "demo" })');
+    expect(found.content[0].text).toContain('Server: other; call: mcp({ tool: "other_search", server: "other" })');
+
+    const called = await executeCall(state, "other_search", {}, "demo");
+    expect(called.details).toMatchObject({ error: "tool_not_found", ownerCandidates: [
+      { server: "other", tool: "other_search" },
+      { server: "third", tool: "other_search" },
+    ] });
+    expect(called.content[0].text).toContain('server: "other"');
+    expect(called.content[0].text).toContain('server: "third"');
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
   it("keeps server-scoped describe suggestions on the selected server", () => {
     const state = createState();
     state.config.mcpServers.other = { command: "other" };
