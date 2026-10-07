@@ -150,6 +150,23 @@ function getEnabledOriginalToolMatches(state: McpExtensionState, toolName: strin
   return matches;
 }
 
+function getExactOwnerGuidance(state: McpExtensionState, toolName: string, excludeServer?: string): { message: string; candidates: Array<{ server: string; tool: string }> } | undefined {
+  const candidates: Array<{ server: string; tool: string }> = [];
+  for (const [server, metadata] of state.toolMetadata) {
+    if (server === excludeServer || isServerDisabled(state.config.mcpServers[server])) continue;
+    for (const tool of metadata) {
+      if (tool.name === toolName || tool.originalName === toolName) {
+        candidates.push({ server, tool: tool.name });
+      }
+    }
+  }
+  const bounded = candidates.slice(0, 5);
+  if (bounded.length === 0) return undefined;
+  const heading = bounded.length === 1 ? "Known owner" : `Ambiguous: ${bounded.length === candidates.length ? "multiple" : "multiple or more"} known owners`;
+  const choices = bounded.map(({ server, tool }) => `mcp({ tool: ${JSON.stringify(tool)}, server: ${JSON.stringify(server)} })`).join("; ");
+  return { message: `${heading} for tool "${toolName}". Use a server-qualified call: ${choices}`, candidates: bounded };
+}
+
 function serverBackoffResult(state: McpExtensionState, mode: string, serverName: string): ProxyToolResult {
   const message = `Server "${serverName}" not available (last ${describeFailure(state, serverName) ?? "failed 0s ago"})`;
   return {
@@ -802,7 +819,8 @@ export function resolveDescribeTarget(
   }
 
   const suggestions = rankSuggestions(state, toolName, 5, serverOverride);
-  const suggestionText = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}` : "";
+  const ownerGuidance = getExactOwnerGuidance(state, toolName, serverOverride);
+  const suggestionText = `${suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}` : ""}${ownerGuidance ? ` ${ownerGuidance.message}` : ""}`;
   const scopeText = serverOverride ? ` on server "${serverOverride}"` : "";
   const searchHint = serverOverride
     ? `mcp({ search: "...", server: "${serverOverride}" })`
@@ -810,7 +828,10 @@ export function resolveDescribeTarget(
   return {
     error: {
       content: [{ type: "text" as const, text: `Tool "${toolName}" not found${scopeText}. Use ${searchHint} to search.${suggestionText}` }],
-      details: { mode: "describe", error: "tool_not_found", server: serverOverride, requestedTool: toolName, suggestions },
+      details: {
+        mode: "describe", error: "tool_not_found", server: serverOverride, requestedTool: toolName, suggestions,
+        ...(ownerGuidance ? { ownerCandidates: ownerGuidance.candidates } : {}),
+      },
     },
   };
 }
@@ -895,6 +916,7 @@ function renderSearchResults(
       : "";
     if (showSchemas) {
       text += `${match.tool.name}${approvalMarker}\n`;
+      text += `  Server: ${match.server}; call: mcp({ tool: ${JSON.stringify(match.tool.name)}, server: ${JSON.stringify(match.server)} })\n`;
       text += `  ${match.tool.description || "(no description)"}\n`;
       if (match.tool.inputSchema && !match.tool.resourceUri) {
         const shape = renderTsShape(match.tool.inputSchema);
@@ -906,7 +928,7 @@ function renderSearchResults(
       }
       text += "\n";
     } else {
-      text += `- ${match.tool.name}${approvalMarker}`;
+      text += `- ${match.tool.name}${approvalMarker} (server: ${match.server}; call: mcp({ tool: ${JSON.stringify(match.tool.name)}, server: ${JSON.stringify(match.server)} }))`;
       if (match.tool.description) text += ` - ${truncateAtWord(match.tool.description, 50)}`;
       text += "\n";
     }
@@ -1451,9 +1473,14 @@ export async function executeCall(
     }
     const suggestions = rankSuggestions(state, toolName, 5, serverOverride);
     if (suggestions.length > 0) msg += ` Did you mean: ${suggestions.join(", ")}`;
+    const ownerGuidance = getExactOwnerGuidance(state, toolName, serverOverride);
+    if (ownerGuidance) msg += ` ${ownerGuidance.message}`;
     return {
       content: [{ type: "text" as const, text: msg }],
-      details: { mode: "call", error: "tool_not_found", requestedTool: toolName, hintServer, suggestions },
+      details: {
+        mode: "call", error: "tool_not_found", requestedTool: toolName, hintServer, suggestions,
+        ...(ownerGuidance ? { ownerCandidates: ownerGuidance.candidates } : {}),
+      },
     };
   }
 
