@@ -48,6 +48,7 @@
     "build:public": "tsc -p tsconfig.public.json",
     "prepack": "npm run build:public",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run build:public",
     "test": "node test-runner.mjs",
     "test:vitest": "vitest run",
     "test:public-exports": "npm run build:public && node --test public-exports.test.mjs",
