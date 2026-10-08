@@ -173,10 +173,16 @@ selects the existing externally keyed encrypted backend for the cohort proof;
 launch tokens remain memory-only. An unavailable secure store is an error.
 
 When the work period elapses, requests report the same non-secret human renewal
-URL. Open it once, approve with the broker's fresh TOTP, then manually continue
-each paused session (or reconnect / run `/mcp-auth broker`). Status checks and
-credential replacement are silent, including idle/absolute-expired old bearers.
-This option does not automatically replay tool calls or renew human authority.
+URL. Pending tool calls wait up to five minutes: open that URL once and approve
+with the broker's fresh TOTP to release eligible calls without typing continue.
+Only validated API-v1 pre-execution pauses qualify, including the SDK credential
+preflight before dispatch. Calls with ambiguous outcomes are never replayed.
+Status checks and credential replacement are silent, including idle/absolute-expired
+old bearers. No idle or completed model turn is revived and human authority is
+never automatically renewed. See [pending-call recovery](coding-call-recovery.md)
+for budgets, cancellation and manual fallback. After the wait expires, renew and
+manually continue with the original tool and arguments (or reconnect / run
+`/mcp-auth broker`); nothing retries in the background.
 Extra capability grants are not transferred to replacement sessions. Logout,
 revocation and cancellation prevent late installation; a revoked launch does
 not fall back to cohort enrollment. Start fresh human consent in a new launch

@@ -1729,6 +1729,8 @@ export async function executeCall(
     const recordOutput = observedOutputRecorder(state, serverName, toolMeta.originalName);
     const result = await withSessionRecovery<ClientCallToolResult>(
       {
+        pendingCodingCall: true,
+        onCodingWait: (message) => state.ui?.notify(message, "info"),
         manager: state.manager,
         config: state.config,
         ...(ownedSignal ? { signal: ownedSignal } : {}),

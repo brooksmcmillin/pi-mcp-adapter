@@ -16,7 +16,7 @@ import pyotp
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
@@ -67,8 +67,20 @@ def main() -> None:
             )
             return JSONResponse(issued, headers={"Cache-Control": "no-store"})
 
+        forwards: dict[str, int] = {}
+        pause_on_call = False
+        rejected_calls = 0
+
         async def control(request: Request) -> JSONResponse:
+            nonlocal pause_on_call
             action = request.path_params["action"]
+            if action == "pause-on-call":
+                pause_on_call = True
+                return JSONResponse({"reference": reference})
+            if action == "pause-only":
+                conn.execute("UPDATE coding_authorizations SET expires_at = '2000-01-01T00:00:00.000Z'")
+                conn.commit()
+                return JSONResponse({"reference": reference})
             if action == "pause":
                 conn.execute(
                     "UPDATE coding_authorizations SET expires_at = '2000-01-01T00:00:00.000Z'"
@@ -97,6 +109,8 @@ def main() -> None:
             if action == "counts":
                 return JSONResponse(
                     {
+                        "forwards": forwards,
+                        "rejected_calls": rejected_calls,
                         "renewals": conn.execute(
                             "SELECT count(*) FROM coding_authorization_events WHERE event_type = 'renewed'"
                         ).fetchone()[0]
@@ -104,14 +118,38 @@ def main() -> None:
                 )
             return JSONResponse({"error": "unknown"}, status_code=400)
 
-        async def mcp(request: Request) -> JSONResponse:
+        async def mcp(request: Request) -> Response:
+            nonlocal pause_on_call, rejected_calls
             bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
-            outcome = gateway.handle_tools_call(await request.json(), bearer, conn)
+            message = await request.json()
+            method = message.get("method")
+            if "id" not in message:
+                return Response(status_code=202)
+            if method == "initialize":
+                return JSONResponse({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "protocolVersion": message["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "synthetic-coding-broker", "version": "1"},
+                }})
+            if method == "tools/list":
+                return JSONResponse({"jsonrpc": "2.0", "id": message["id"], "result": {"tools": [{
+                    "name": "nexus.get_task", "inputSchema": {"type": "object", "properties": {}},
+                }]}})
+            if method in ("resources/list", "prompts/list"):
+                return JSONResponse({"jsonrpc": "2.0", "id": message["id"], "result": {method.split("/")[0]: []}})
+            if method == "tools/call" and pause_on_call:
+                pause_on_call = False
+                conn.execute("UPDATE coding_authorizations SET expires_at = '2000-01-01T00:00:00.000Z'")
+                conn.commit()
+            outcome = gateway.handle_tools_call(message, bearer, conn)
+            if outcome.response and outcome.response.get("error", {}).get("data", {}).get("status") == "authorization_paused":
+                rejected_calls += 1
             if outcome.forward is not None:
+                key = str(message.get("params", {}).get("arguments", {}).get("operation", "legacy"))
+                forwards[key] = forwards.get(key, 0) + 1
                 return JSONResponse(
                     {
                         "jsonrpc": "2.0",
-                        "id": 1,
+                        "id": message["id"],
                         "result": {
                             "content": [
                                 {

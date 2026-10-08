@@ -323,6 +323,8 @@ export function createDirectToolExecutor(
       const recordOutput = observedOutputRecorder(state, spec.serverName, spec.originalName);
       const result = await withSessionRecovery<ClientCallToolResult>(
         {
+          pendingCodingCall: true,
+          onCodingWait: (message) => state.ui?.notify(message, "info"),
           manager: state.manager,
           config: state.config,
           ...(ownedSignal ? { signal: ownedSignal } : {}),

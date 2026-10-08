@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "cases": [
+    {"name": "pause", "status": "authorization_paused", "error_code": -32003, "http_status": 403, "retryable": true, "execution": "not_executed", "forwarded": false, "consumer_action": "wait_for_human_renewal"},
+    {"name": "renewal", "status": "active", "consumer_action": "reauthenticate_then_retry_definitively_rejected_call"},
+    {"name": "cohort_revocation", "status": "authorization_revoked", "error_code": -32003, "http_status": 403, "retryable": false, "execution": "not_executed", "forwarded": false, "consumer_action": "stop"},
+    {"name": "session_revocation", "status": "session_revoked", "error_code": -32001, "http_status": 401, "retryable": false, "execution": "not_executed", "forwarded": false, "consumer_action": "stop"},
+    {"name": "invalid_credential", "status": "invalid_credentials", "error_code": -32001, "http_status": 401, "retryable": false, "execution": "not_executed", "forwarded": false, "consumer_action": "stop"},
+    {"name": "wrong_profile", "status": "authorization_profile_mismatch", "error_code": -32003, "http_status": 403, "retryable": false, "execution": "not_executed", "forwarded": false, "consumer_action": "stop"},
+    {"name": "wrong_owner", "operation": "attach_or_renew", "result": "AuthorizationError", "consumer_action": "stop"},
+    {"name": "version_mismatch", "received_version": 2, "supported_version": 1, "consumer_action": "do_not_retry"}
+  ],
+  "pause_required_fields": ["version", "status", "authorization_ref", "expires_at", "revision", "status_route", "renewal_requires_human", "retryable", "execution", "forwarded"],
+  "status_route": "authorization.status",
+  "renewal_requires_human": true
+}

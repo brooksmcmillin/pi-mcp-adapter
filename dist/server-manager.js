@@ -205,6 +205,18 @@ function createProviderTokenFetch(serverUrl, provider, providerToken, delegate) 
 export class McpServerManager {
     defaultCwd;
     connections = new Map();
+    codingProviders = new WeakMap();
+    runPendingCodingCall(name, connection, call, options) {
+        const provider = this.codingProviders.get(connection.client);
+        if (!provider)
+            return call();
+        return provider.runPendingCodingCall(call, { ...options, check: () => {
+                options.check();
+                if (this.connections.get(name) !== connection || connection.status !== "connected") {
+                    throw new Error("Coding pending call cancelled by connection change; manually continue to check current status");
+                }
+            } });
+    }
     connectPromises = new Map();
     connectOAuthAuthorities = new Map();
     reconnectPromises = new Map();
@@ -1448,6 +1460,8 @@ export class McpServerManager {
                 const client = this.createClient(serverName, definition);
                 try {
                     await this.connectClientWithAbort(client, transport, requestOptions, signal);
+                    if (coding && authProvider)
+                        this.codingProviders.set(client, authProvider);
                     return { status: "connected", client, transport };
                 }
                 catch (error) {

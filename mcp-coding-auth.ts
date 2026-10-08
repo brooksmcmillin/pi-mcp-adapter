@@ -3,6 +3,7 @@ import type { FetchLike } from "@modelcontextprotocol/client"
 import { z } from "zod"
 import { abortable } from "./abort.ts"
 import { combineAbortSignals } from "./runtime-owner.ts"
+import { CodingAuthorizationPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS, type CodingWaitOptions } from "./coding-call-recovery.ts"
 import {
   getAuthForUrl, getAuthStorageIdentity, invalidateAuthEntryCache, saveAuthEntry,
   type AuthStorageOptions, type OAuthAuthority, type StoredTokens,
@@ -25,7 +26,7 @@ const unsupported = "Broker coding API v1 is required; upgrade the broker or dis
 const terminal = "Coding enrollment revoked or invalid; start fresh human consent."
 
 type RecoveryMode = "ensure" | "status" | "replace"
-type LaunchState = { credentials?: CodingCredentials | undefined; denied: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode; selectedConfig?: CodingEnrollmentConfig | undefined }
+type LaunchState = { epoch: number; calls?: Promise<unknown> | undefined; credentials?: CodingCredentials | undefined; denied: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode; selectedConfig?: CodingEnrollmentConfig | undefined }
 const REGISTRY = Symbol.for("pi-mcp-adapter.coding-launches.v1")
 const host = globalThis as typeof globalThis & { [REGISTRY]?: WeakMap<object, Map<string, LaunchState>> }
 const registry = host[REGISTRY] ??= new WeakMap<object, Map<string, LaunchState>>()
@@ -53,7 +54,7 @@ export function getRetainedCodingConfig(name: string, url: string, storage: Auth
 export function logoutCodingLaunch(name: string, storage: AuthStorageOptions): void {
   if (storage.persistence !== "session" || !storage.sessionEntries) return
   for (const [key, state] of launchStates(storage)) {
-    if ((JSON.parse(key) as string[])[0] === name) { state.denied = true; state.credentials = undefined }
+    if ((JSON.parse(key) as string[])[0] === name) { state.epoch = (state.epoch ?? 0) + 1; state.denied = true; state.credentials = undefined }
   }
 }
 
@@ -83,12 +84,16 @@ export class CodingAuthClient {
     const key = JSON.stringify([name, url, getAuthStorageIdentity(storage), config.cohort])
     const launches = launchStates(storage)
     let state = launches.get(key)
-    if (!state) { state = { denied: false }; launches.set(key, state) }
+    if (!state) { state = { epoch: 0, denied: false }; launches.set(key, state) }
+    state.epoch ??= 0
     // Keep the active binding with the existing host-owned launch state, not
     // ambient configuration or persisted bearer credentials.
     for (const [launchKey, launch] of launches) {
       const [launchName, , identity] = JSON.parse(launchKey) as string[]
-      if (launchName === name && identity === getAuthStorageIdentity(storage)) launch.selectedConfig = undefined
+      if (launchName === name && identity === getAuthStorageIdentity(storage)) {
+        if (launch !== state && launch.selectedConfig) launch.epoch = (launch.epoch ?? 0) + 1
+        launch.selectedConfig = undefined
+      }
     }
     state.selectedConfig = { ...config }
     this.state = state
@@ -100,7 +105,7 @@ export class CodingAuthClient {
     return parsed.data
   }
 
-  install(payload: CodingCredentials, check: OAuthAuthority): void {
+  install(payload: CodingCredentials, check: OAuthAuthority, recovery = false): void {
     check()
     if (!this.state.selectedConfig) throw new Error("Coding session configuration changed; use the current configuration")
     if (payload.cohort_credential) {
@@ -109,6 +114,7 @@ export class CodingAuthClient {
     check()
     const entry = getAuthForUrl(this.name, this.url, this.storage) ?? {}
     saveAuthEntry(this.name, { ...entry, tokens: this.toStored(payload) }, this.url, this.storage)
+    if (!recovery) this.state.epoch++
     this.state.credentials = payload
     this.state.denied = false
   }
@@ -119,6 +125,7 @@ export class CodingAuthClient {
   }
 
   logout(): void {
+    this.state.epoch++
     this.state.denied = true
     this.state.credentials = undefined
   }
@@ -146,14 +153,54 @@ export class CodingAuthClient {
     finally { if (this.state.pending === operation) this.state.pending = undefined }
   }
 
+  async runPending<T>(call: () => Promise<T>, fetchFn: FetchLike, options: CodingWaitOptions): Promise<T> {
+    const epoch = this.state.epoch
+    const check = () => {
+      options.check(); options.signal?.throwIfAborted()
+      if (this.state.epoch !== epoch || this.state.denied || !this.state.selectedConfig) throw new Error("Coding pending call cancelled by credential or configuration change")
+    }
+    const previous = this.state.calls
+    const operation = (async () => {
+      if (previous) {
+        const deadline = AbortSignal.timeout(CODING_WAIT_BUDGET_MS)
+        const queueSignal = combineAbortSignals(options.signal, deadline)!
+        try { await abortable(previous.catch(() => {}), queueSignal) }
+        catch (error) {
+          options.signal?.throwIfAborted()
+          if (deadline.aborted) throw new Error("Coding call queue wait ended before dispatch; manually continue with the original tool and arguments. No background retry remains.")
+          throw error
+        }
+      }
+      check()
+      try { return await call() }
+      catch (error) {
+        check()
+        const reference = error instanceof CodingAuthorizationPaused ? error.reference : rejectedCodingReference(error)
+        if (!reference || reference !== this.state.credentials?.authorization_ref) throw error
+        const pause = new CodingAuthorizationPaused(reference, new URL(`/broker/coding/renew?authorization_ref=${reference}`, this.issuer).toString())
+        await waitForCodingRenewal(pause, async (signal) => {
+          await this.tokens(fetchFn, check, signal)
+        }, { ...options, check })
+        check()
+        // One retry only. Any ambiguous failure (including a lost retry response) escapes.
+        return call()
+      }
+    })()
+    // A cancelled queued caller must not let the next caller overtake its predecessor.
+    const tail = Promise.allSettled([previous, operation])
+    this.state.calls = tail
+    try { return await operation }
+    finally { void tail.then(() => { if (this.state.calls === tail) this.state.calls = undefined }) }
+  }
+
   private paused(reference: string | undefined): Error {
     if (!reference || !/^[A-Za-z0-9_-]{1,128}$/.test(reference)) return new Error("Coding authorization paused; use the common human renewal page, then continue")
     const route = new URL(`/broker/coding/renew?authorization_ref=${reference}`, this.issuer).toString()
-    return new Error(`Coding authorization paused. Open ${route} for human renewal, then continue.`)
+    return new CodingAuthorizationPaused(reference, route)
   }
 
   private async recover(fetchFn: FetchLike, check: OAuthAuthority, signal: AbortSignal | undefined, mode: RecoveryMode): Promise<StoredTokens | null> {
-    let pausedError = this.paused(this.state.credentials?.authorization_ref)
+    let pausedError = new Error(this.paused(this.state.credentials?.authorization_ref).message)
     const request = async (route: string, body: Record<string, string>): Promise<unknown> => {
       check()
       const requestSignal = combineAbortSignals(signal, AbortSignal.timeout(30_000))!
@@ -187,11 +234,11 @@ export class CodingAuthClient {
       const cohort = getAuthForUrl(this.cohortAccount, this.url, this.persistent)
       check()
       if (!cohort?.cohortCredential) return null
-      pausedError = this.paused(cohort.cohortReference)
+      pausedError = new Error(this.paused(cohort.cohortReference).message)
       const payload = this.parseCredentials(await request("enroll", { cohort_credential: cohort.cohortCredential }))
       check()
       if (this.state.credentials !== undefined) throw new Error("Coding credentials changed while enrolling")
-      this.install(payload, check)
+      this.install(payload, check, true)
       return this.toStored(payload)
     }
     const parsed = statusSchema.safeParse(await request("status", { enrollment_token: current.enrollment_token }))
@@ -201,7 +248,7 @@ export class CodingAuthClient {
     if (status.authorization_ref !== current.authorization_ref || status.renewal_route !== expectedRoute) throw new Error("Invalid coding renewal guidance")
     check()
     if (status.status === "authorization_paused") {
-      throw pausedError
+      throw this.paused(current.authorization_ref)
     }
     // SDK auth reads need the old refresh pair after the status gate, not a first
     // rotation followed by a second rotation in its token-endpoint request.
@@ -212,7 +259,7 @@ export class CodingAuthClient {
     if (replacement.authorization_ref !== current.authorization_ref || replacement.cohort_credential !== undefined) throw new Error("Invalid coding replacement response")
     check()
     if (this.state.credentials !== current) throw new Error("Coding credentials changed while rotating")
-    this.install(replacement, check)
+    this.install(replacement, check, true)
     return this.toStored(replacement)
   }
 }

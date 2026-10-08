@@ -340,6 +340,19 @@ function createProviderTokenFetch(
 
 export class McpServerManager {
   private connections = new Map<string, ServerConnection>();
+  private codingProviders = new WeakMap<Client, McpOAuthProvider>();
+
+  runPendingCodingCall<T>(name: string, connection: ServerConnection, call: () => Promise<T>,
+    options: import("./coding-call-recovery.ts").CodingWaitOptions): Promise<T> {
+    const provider = this.codingProviders.get(connection.client);
+    if (!provider) return call();
+    return provider.runPendingCodingCall(call, { ...options, check: () => {
+      options.check();
+      if (this.connections.get(name) !== connection || connection.status !== "connected") {
+        throw new Error("Coding pending call cancelled by connection change; manually continue to check current status");
+      }
+    } });
+  }
   private connectPromises = new Map<string, Promise<ServerConnection>>();
   private connectOAuthAuthorities = new Map<string, OAuthAuthority>();
   private reconnectPromises = new Map<string, Promise<ServerConnection>>();
@@ -1780,6 +1793,7 @@ export class McpServerManager {
 
       try {
         await this.connectClientWithAbort(client, transport, requestOptions, signal);
+        if (coding && authProvider) this.codingProviders.set(client, authProvider);
         return { status: "connected", client, transport };
       } catch (error) {
         if (error instanceof SseError && sseFetchFailure !== undefined) {

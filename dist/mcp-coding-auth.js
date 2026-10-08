@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { abortable } from "./abort.js";
 import { combineAbortSignals } from "./runtime-owner.js";
+import { CodingAuthorizationPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS } from "./coding-call-recovery.js";
 import { getAuthForUrl, getAuthStorageIdentity, invalidateAuthEntryCache, saveAuthEntry, } from "./mcp-auth.js";
 const credentialSchema = z.object({
     version: z.literal(1), token_type: z.literal("Bearer"), scope: z.literal("profile:coding"),
@@ -48,6 +49,7 @@ export function logoutCodingLaunch(name, storage) {
         return;
     for (const [key, state] of launchStates(storage)) {
         if (JSON.parse(key)[0] === name) {
+            state.epoch = (state.epoch ?? 0) + 1;
             state.denied = true;
             state.credentials = undefined;
         }
@@ -86,15 +88,19 @@ export class CodingAuthClient {
         const launches = launchStates(storage);
         let state = launches.get(key);
         if (!state) {
-            state = { denied: false };
+            state = { epoch: 0, denied: false };
             launches.set(key, state);
         }
+        state.epoch ??= 0;
         // Keep the active binding with the existing host-owned launch state, not
         // ambient configuration or persisted bearer credentials.
         for (const [launchKey, launch] of launches) {
             const [launchName, , identity] = JSON.parse(launchKey);
-            if (launchName === name && identity === getAuthStorageIdentity(storage))
+            if (launchName === name && identity === getAuthStorageIdentity(storage)) {
+                if (launch !== state && launch.selectedConfig)
+                    launch.epoch = (launch.epoch ?? 0) + 1;
                 launch.selectedConfig = undefined;
+            }
         }
         state.selectedConfig = { ...config };
         this.state = state;
@@ -105,7 +111,7 @@ export class CodingAuthClient {
             throw new Error(unsupported + " Select shared coding in the human consent form.");
         return parsed.data;
     }
-    install(payload, check) {
+    install(payload, check, recovery = false) {
         check();
         if (!this.state.selectedConfig)
             throw new Error("Coding session configuration changed; use the current configuration");
@@ -115,6 +121,8 @@ export class CodingAuthClient {
         check();
         const entry = getAuthForUrl(this.name, this.url, this.storage) ?? {};
         saveAuthEntry(this.name, { ...entry, tokens: this.toStored(payload) }, this.url, this.storage);
+        if (!recovery)
+            this.state.epoch++;
         this.state.credentials = payload;
         this.state.denied = false;
     }
@@ -123,6 +131,7 @@ export class CodingAuthClient {
             scope: payload.scope, issuer: this.issuer };
     }
     logout() {
+        this.state.epoch++;
         this.state.denied = true;
         this.state.credentials = undefined;
     }
@@ -160,14 +169,66 @@ export class CodingAuthClient {
                 this.state.pending = undefined;
         }
     }
+    async runPending(call, fetchFn, options) {
+        const epoch = this.state.epoch;
+        const check = () => {
+            options.check();
+            options.signal?.throwIfAborted();
+            if (this.state.epoch !== epoch || this.state.denied || !this.state.selectedConfig)
+                throw new Error("Coding pending call cancelled by credential or configuration change");
+        };
+        const previous = this.state.calls;
+        const operation = (async () => {
+            if (previous) {
+                const deadline = AbortSignal.timeout(CODING_WAIT_BUDGET_MS);
+                const queueSignal = combineAbortSignals(options.signal, deadline);
+                try {
+                    await abortable(previous.catch(() => { }), queueSignal);
+                }
+                catch (error) {
+                    options.signal?.throwIfAborted();
+                    if (deadline.aborted)
+                        throw new Error("Coding call queue wait ended before dispatch; manually continue with the original tool and arguments. No background retry remains.");
+                    throw error;
+                }
+            }
+            check();
+            try {
+                return await call();
+            }
+            catch (error) {
+                check();
+                const reference = error instanceof CodingAuthorizationPaused ? error.reference : rejectedCodingReference(error);
+                if (!reference || reference !== this.state.credentials?.authorization_ref)
+                    throw error;
+                const pause = new CodingAuthorizationPaused(reference, new URL(`/broker/coding/renew?authorization_ref=${reference}`, this.issuer).toString());
+                await waitForCodingRenewal(pause, async (signal) => {
+                    await this.tokens(fetchFn, check, signal);
+                }, { ...options, check });
+                check();
+                // One retry only. Any ambiguous failure (including a lost retry response) escapes.
+                return call();
+            }
+        })();
+        // A cancelled queued caller must not let the next caller overtake its predecessor.
+        const tail = Promise.allSettled([previous, operation]);
+        this.state.calls = tail;
+        try {
+            return await operation;
+        }
+        finally {
+            void tail.then(() => { if (this.state.calls === tail)
+                this.state.calls = undefined; });
+        }
+    }
     paused(reference) {
         if (!reference || !/^[A-Za-z0-9_-]{1,128}$/.test(reference))
             return new Error("Coding authorization paused; use the common human renewal page, then continue");
         const route = new URL(`/broker/coding/renew?authorization_ref=${reference}`, this.issuer).toString();
-        return new Error(`Coding authorization paused. Open ${route} for human renewal, then continue.`);
+        return new CodingAuthorizationPaused(reference, route);
     }
     async recover(fetchFn, check, signal, mode) {
-        let pausedError = this.paused(this.state.credentials?.authorization_ref);
+        let pausedError = new Error(this.paused(this.state.credentials?.authorization_ref).message);
         const request = async (route, body) => {
             check();
             const requestSignal = combineAbortSignals(signal, AbortSignal.timeout(30_000));
@@ -206,12 +267,12 @@ export class CodingAuthClient {
             check();
             if (!cohort?.cohortCredential)
                 return null;
-            pausedError = this.paused(cohort.cohortReference);
+            pausedError = new Error(this.paused(cohort.cohortReference).message);
             const payload = this.parseCredentials(await request("enroll", { cohort_credential: cohort.cohortCredential }));
             check();
             if (this.state.credentials !== undefined)
                 throw new Error("Coding credentials changed while enrolling");
-            this.install(payload, check);
+            this.install(payload, check, true);
             return this.toStored(payload);
         }
         const parsed = statusSchema.safeParse(await request("status", { enrollment_token: current.enrollment_token }));
@@ -223,7 +284,7 @@ export class CodingAuthClient {
             throw new Error("Invalid coding renewal guidance");
         check();
         if (status.status === "authorization_paused") {
-            throw pausedError;
+            throw this.paused(current.authorization_ref);
         }
         // SDK auth reads need the old refresh pair after the status gate, not a first
         // rotation followed by a second rotation in its token-endpoint request.
@@ -236,7 +297,7 @@ export class CodingAuthClient {
         check();
         if (this.state.credentials !== current)
             throw new Error("Coding credentials changed while rotating");
-        this.install(replacement, check);
+        this.install(replacement, check, true);
         return this.toStored(replacement);
     }
 }

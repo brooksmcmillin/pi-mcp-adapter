@@ -9,6 +9,7 @@ import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } fr
 import { type AuthStorageOptions, type OAuthAuthority } from "./mcp-auth.ts";
 import { type OAuthFetch } from "./mcp-auth-fetch.ts";
 import { type CodingEnrollmentConfig } from "./mcp-coding-auth.ts";
+import { type CodingWaitOptions } from "./coding-call-recovery.ts";
 declare const DEFAULT_OAUTH_CALLBACK_HOST = "127.0.0.1";
 declare const DEFAULT_OAUTH_CALLBACK_PORT = 19876;
 declare const DEFAULT_OAUTH_CALLBACK_PATH = "/callback";
@@ -75,6 +76,7 @@ export declare class McpOAuthProvider implements OAuthClientProvider {
     private adoptCodingSession;
     getAuthFetch(): OAuthFetch;
     get codingEnrollmentEnabled(): boolean;
+    runPendingCodingCall<T>(call: () => Promise<T>, options: CodingWaitOptions): Promise<T>;
     private get usesClientCredentials();
     private get discoveredIssuer();
     deactivate(): void;

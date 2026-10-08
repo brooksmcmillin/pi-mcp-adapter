@@ -11,6 +11,7 @@ import { createOAuthFetch } from "./mcp-auth-fetch.js";
 import { resolveCommandSecret } from "./utils.js";
 import { getAppClientUri, getAppName } from "./agent-dir.js";
 import { CodingAuthClient, getRetainedCodingConfig } from "./mcp-coding-auth.js";
+import { codingHttpRejection } from "./coding-call-recovery.js";
 /**
  * Client name advertised during Dynamic Client Registration.
  *
@@ -281,7 +282,16 @@ export class McpOAuthProvider {
                     return response;
                 }
             }
-            return fetchFn(input, init);
+            const response = await fetchFn(input, init);
+            check();
+            if (url.toString() === this.serverUrl && method === "POST" && response.status === 403) {
+                const body = await new Request(request ? request.clone() : input, init).text();
+                const rejection = await codingHttpRejection(response, body);
+                check();
+                if (rejection)
+                    throw rejection;
+            }
+            return response;
         }, { throwIfHeaderResolutionFailed: () => fetchFn.throwIfHeaderResolutionFailed() });
     }
     /** Use the same credential-aware fetch in the SDK and transport. */
@@ -307,6 +317,15 @@ export class McpOAuthProvider {
         }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() });
     }
     get codingEnrollmentEnabled() { this.adoptCodingSession(); return this.coding !== undefined; }
+    runPendingCodingCall(call, options) {
+        this.adoptCodingSession();
+        if (!this.coding)
+            return call();
+        return this.coding.runPending(call, this.authFetch, { ...options, check: () => {
+                this.throwIfInactive();
+                options.check();
+            } });
+    }
     get usesClientCredentials() {
         return this.config.grantType === "client_credentials";
     }

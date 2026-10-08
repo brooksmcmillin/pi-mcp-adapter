@@ -1,5 +1,6 @@
 import type { FetchLike } from "@modelcontextprotocol/client";
 import { z } from "zod";
+import { type CodingWaitOptions } from "./coding-call-recovery.ts";
 import { type AuthStorageOptions, type OAuthAuthority, type StoredTokens } from "./mcp-auth.ts";
 export interface CodingEnrollmentConfig {
     version: 1;
@@ -32,10 +33,11 @@ export declare class CodingAuthClient {
     readonly issuer: string;
     constructor(name: string, url: string, config: CodingEnrollmentConfig, storage: AuthStorageOptions);
     parseCredentials(payload: unknown): CodingCredentials;
-    install(payload: CodingCredentials, check: OAuthAuthority): void;
+    install(payload: CodingCredentials, check: OAuthAuthority, recovery?: boolean): void;
     private toStored;
     logout(): void;
     tokens(fetchFn: FetchLike, check: OAuthAuthority, signal?: AbortSignal, mode?: RecoveryMode): Promise<StoredTokens | null>;
+    runPending<T>(call: () => Promise<T>, fetchFn: FetchLike, options: CodingWaitOptions): Promise<T>;
     private paused;
     private recover;
 }
