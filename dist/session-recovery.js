@@ -91,8 +91,19 @@ export async function withSessionRecovery(deps, serverName, fn) {
         throw new Error(`Server "${serverName}" is not connected`);
     }
     const hadSessionId = hasSessionId(connection);
+    const definitionAtStart = deps.config.mcpServers[serverName];
+    const invoke = (conn) => deps.pendingCodingCall && deps.manager.runPendingCodingCall
+        ? deps.manager.runPendingCodingCall(serverName, conn, () => fn(conn), {
+            signal: deps.signal, notify: deps.onCodingWait,
+            check: () => {
+                throwIfAborted(deps.signal);
+                if (deps.config.mcpServers[serverName] !== definitionAtStart || isServerDisabled(definitionAtStart)) {
+                    throw new Error("Coding pending call cancelled by configuration change");
+                }
+            },
+        }) : fn(conn);
     try {
-        return await fn(connection);
+        return await invoke(connection);
     }
     catch (err) {
         const definition = deps.config.mcpServers[serverName];
@@ -143,7 +154,7 @@ export async function withSessionRecovery(deps, serverName, fn) {
             logger.debug(`MCP metadata publication after reconnect failed for "${serverName}": ${message}`);
         }
         throwIfAborted(deps.signal);
-        return fn(freshConnection);
+        return invoke(freshConnection);
     }
 }
 //# sourceMappingURL=session-recovery.js.map

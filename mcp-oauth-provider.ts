@@ -37,6 +37,7 @@ import { createOAuthFetch, type OAuthFetch } from "./mcp-auth-fetch.ts"
 import { resolveCommandSecret } from "./utils.ts"
 import { getAppClientUri, getAppName } from "./agent-dir.ts"
 import { CodingAuthClient, getRetainedCodingConfig, type CodingCredentials, type CodingEnrollmentConfig } from "./mcp-coding-auth.ts"
+import { codingHttpRejection, type CodingWaitOptions } from "./coding-call-recovery.ts"
 
 /**
  * Client name advertised during Dynamic Client Registration.
@@ -346,7 +347,15 @@ export class McpOAuthProvider implements OAuthClientProvider {
           return response
         }
       }
-      return fetchFn(input, init)
+      const response = await fetchFn(input, init)
+      check()
+      if (url.toString() === this.serverUrl && method === "POST" && response.status === 403) {
+        const body = await new Request(request ? request.clone() : input, init).text()
+        const rejection = await codingHttpRejection(response, body)
+        check()
+        if (rejection) throw rejection
+      }
+      return response
     }, { throwIfHeaderResolutionFailed: () => fetchFn.throwIfHeaderResolutionFailed() })
   }
 
@@ -371,6 +380,14 @@ export class McpOAuthProvider implements OAuthClientProvider {
     }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() })
   }
   get codingEnrollmentEnabled(): boolean { this.adoptCodingSession(); return this.coding !== undefined }
+
+  runPendingCodingCall<T>(call: () => Promise<T>, options: CodingWaitOptions): Promise<T> {
+    this.adoptCodingSession()
+    if (!this.coding) return call()
+    return this.coding.runPending(call, this.authFetch, { ...options, check: () => {
+      this.throwIfInactive(); options.check()
+    } })
+  }
 
   private get usesClientCredentials(): boolean {
     return this.config.grantType === "client_credentials"

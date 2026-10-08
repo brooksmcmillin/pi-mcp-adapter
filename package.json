@@ -166,6 +166,7 @@
     "mcp-auth-flow.ts",
     "mcp-device-auth.ts",
     "mcp-coding-auth.ts",
+    "coding-call-recovery.ts",
     "mcp-auth-fetch.ts",
     "mcp-panel.ts",
     "mcp-panel-theme.ts",

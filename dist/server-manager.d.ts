@@ -54,6 +54,8 @@ export declare function isTransientHttpConnectError(error: unknown): boolean;
 export declare class McpServerManager {
     private readonly defaultCwd?;
     private connections;
+    private codingProviders;
+    runPendingCodingCall<T>(name: string, connection: ServerConnection, call: () => Promise<T>, options: import("./coding-call-recovery.ts").CodingWaitOptions): Promise<T>;
     private connectPromises;
     private connectOAuthAuthorities;
     private reconnectPromises;

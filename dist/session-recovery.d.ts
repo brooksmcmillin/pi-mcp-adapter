@@ -11,6 +11,8 @@ export interface SessionRecoveryDeps {
     config: McpConfig;
     signal?: AbortSignal;
     onNeedsAuth?: (serverName: string) => Promise<ServerConnection | undefined>;
+    pendingCodingCall?: boolean;
+    onCodingWait?: ((message: string) => void) | undefined;
 }
 /**
  * Runs `fn` against the current connection for `serverName`. If it fails

@@ -77,6 +77,8 @@ export interface SessionRecoveryDeps {
   config: McpConfig;
   signal?: AbortSignal;
   onNeedsAuth?: (serverName: string) => Promise<ServerConnection | undefined>;
+  pendingCodingCall?: boolean;
+  onCodingWait?: ((message: string) => void) | undefined;
 }
 
 /**
@@ -104,9 +106,20 @@ export async function withSessionRecovery<T>(
   }
 
   const hadSessionId = hasSessionId(connection);
+  const definitionAtStart = deps.config.mcpServers[serverName];
+  const invoke = (conn: ServerConnection) => deps.pendingCodingCall && deps.manager.runPendingCodingCall
+    ? deps.manager.runPendingCodingCall(serverName, conn, () => fn(conn), {
+      signal: deps.signal, notify: deps.onCodingWait,
+      check: () => {
+        throwIfAborted(deps.signal);
+        if (deps.config.mcpServers[serverName] !== definitionAtStart || isServerDisabled(definitionAtStart)) {
+          throw new Error("Coding pending call cancelled by configuration change");
+        }
+      },
+    }) : fn(conn);
 
   try {
-    return await fn(connection);
+    return await invoke(connection);
   } catch (err) {
     const definition = deps.config.mcpServers[serverName];
     const unauthorized = err instanceof UnauthorizedError || (err instanceof SdkHttpError && err.status === 401);
@@ -159,6 +172,6 @@ export async function withSessionRecovery<T>(
       logger.debug(`MCP metadata publication after reconnect failed for "${serverName}": ${message}`);
     }
     throwIfAborted(deps.signal);
-    return fn(freshConnection);
+    return invoke(freshConnection);
   }
 }
