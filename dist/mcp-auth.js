@@ -577,14 +577,20 @@ export function getAuthStorageOptions(oauthDir, cwd = process.cwd(), persistence
                 registry.set(sessionOwner, stores);
             }
             const existing = stores.get(namespace);
-            if (existing)
+            if (existing) {
+                if (oauthCredentialStore === 'encrypted-file')
+                    existing.cohortCredentialStore = 'encrypted-file';
+                else
+                    delete existing.cohortCredentialStore;
                 return existing;
+            }
         }
         const options = {
             ...(baseDir ? { baseDir } : {}),
             persistence: 'session',
             sessionId: randomUUID(),
             sessionEntries: new Map(),
+            ...(oauthCredentialStore === 'encrypted-file' ? { cohortCredentialStore: 'encrypted-file' } : {}),
         };
         stores?.set(namespace, options);
         return options;
@@ -649,7 +655,9 @@ function toAuthEntry(value) {
     const codeVerifier = optionalString(entry.codeVerifier);
     const oauthState = optionalString(entry.oauthState);
     const serverUrl = optionalString(entry.serverUrl);
-    if (codeVerifier === null || oauthState === null || serverUrl === null)
+    const cohortCredential = optionalString(entry.cohortCredential);
+    const cohortReference = optionalString(entry.cohortReference);
+    if (codeVerifier === null || oauthState === null || serverUrl === null || cohortCredential === null || cohortReference === null)
         return undefined;
     const tokens = entry.tokens === undefined ? undefined : toStoredTokens(entry.tokens);
     const clientInfo = entry.clientInfo === undefined ? undefined : toStoredClientInfo(entry.clientInfo);
@@ -666,6 +674,10 @@ function toAuthEntry(value) {
         authEntry.oauthState = oauthState;
     if (serverUrl !== undefined)
         authEntry.serverUrl = serverUrl;
+    if (cohortCredential !== undefined)
+        authEntry.cohortCredential = cohortCredential;
+    if (cohortReference !== undefined)
+        authEntry.cohortReference = cohortReference;
     return authEntry;
 }
 function toStoredTokens(value) {

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "owner": "server-selected single provisioned broker operator",
+  "requests": {
+    "/broker/coding/enroll": ["cohort_credential"],
+    "/broker/coding/replace": ["enrollment_token", "refresh_token"],
+    "/broker/coding/status": ["enrollment_token"]
+  },
+  "credential_response_fields": ["version", "access_token", "refresh_token", "enrollment_token", "token_type", "scope", "authorization_ref", "expires_at"],
+  "initial_code_response_extra_fields": ["cohort_credential"],
+  "status_response_fields": ["version", "status", "authorization_ref", "expires_at", "revision", "status_route", "renewal_requires_human", "credential_status", "renewal_route"],
+  "statuses": {
+    "active": "Coding policy is active; replace expired session credentials using both enrollment and refresh proofs.",
+    "authorization_paused": "Do not call coding tools or retry enrollment/rotation. Show human renewal guidance, then check status after the human renews.",
+    "invalid_grant": "Terminal or invalid proof. Do not recover with an expired bearer, identifier, label, scope, header or owner text. Start a new human consent if appropriate."
+  },
+  "credential_statuses": ["active", "expired"],
+  "renewal": {
+    "route": "/broker/coding/renew?authorization_ref=<non-secret-reference>",
+    "window_seconds": [14400, 28800],
+    "requires": ["browser-bound consent", "provisioned fresh single-use TOTP"],
+    "secrets_in_url": false
+  }
+}

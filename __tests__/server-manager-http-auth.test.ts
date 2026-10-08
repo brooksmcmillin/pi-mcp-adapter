@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearAllCredentials, getAuthEntryFilePath, getAuthForUrl, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
+import { captureOAuthAuthority, clearAllCredentials, getAuthEntryFilePath, getAuthForUrl, getAuthStorageOptions, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
+import { CodingAuthClient } from "../mcp-coding-auth.ts";
 
 type OAuthProviderLike = {
   redirectUrl?: string;
@@ -128,6 +129,40 @@ describe("McpServerManager HTTP bearer auth", () => {
   });
 
 
+
+  it("routes transport-owned coding refresh through status and proof replacement", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    const storage = getAuthStorageOptions(undefined, process.cwd(), "session");
+    const url = "https://broker.example/broker/mcp";
+    const config = { version: 1 as const, cohort: "transport" };
+    const client = new CodingAuthClient("coding", url, config, storage);
+    const initial = { version: 1 as const, token_type: "Bearer" as const, scope: "profile:coding" as const,
+      access_token: "synthetic-old-access", refresh_token: "synthetic-old-refresh", enrollment_token: "synthetic-old-enrollment",
+      authorization_ref: "coding_transport", expires_at: new Date(Date.now() + 3600_000).toISOString() };
+    client.install(initial, captureOAuthAuthority("coding", true, storage));
+    const paths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      paths.push(path);
+      expect(init?.redirect).toBe("error");
+      const payload = path.endsWith("/status") ? { version: 1, status: "active", authorization_ref: initial.authorization_ref,
+        credential_status: "expired", renewal_route: `/broker/coding/renew?authorization_ref=${initial.authorization_ref}` }
+        : { ...initial, access_token: "synthetic-new-access", refresh_token: "synthetic-new-refresh", enrollment_token: "synthetic-new-enrollment" };
+      return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
+    }));
+    const manager = new McpServerManager();
+    manager.setAuthStorageOptions(storage);
+    try {
+      await manager.connect("coding", { url, auth: "oauth", oauth: { codingEnrollment: config } });
+      const transport = mocks.httpTransports.at(-1)!;
+      const response = await transport.options.fetch!(new URL("https://broker.example/broker/token"), {
+        method: "POST", body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: "synthetic-old-refresh" }),
+      });
+      expect((await response.json()).access_token).toBe("synthetic-new-access");
+      expect(paths).toEqual(["/broker/coding/status", "/broker/coding/replace"]);
+      expect(getAuthForUrl("coding", url, storage)?.tokens?.refreshToken).toBe("synthetic-new-refresh");
+    } finally { await manager.closeAll(); vi.unstubAllGlobals(); }
+  });
 
   it("interpolates ${VAR} URL placeholders", async () => {
     const { McpServerManager } = await import("../server-manager.ts");

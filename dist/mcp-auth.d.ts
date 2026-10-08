@@ -47,6 +47,9 @@ export interface AuthEntry {
     clientInfo?: StoredClientInfo;
     codeVerifier?: string;
     oauthState?: string;
+    /** Private broker cohort proof; never an access or refresh token. */
+    cohortCredential?: string;
+    cohortReference?: string;
     serverUrl?: string;
 }
 export interface AuthStorageOptions {
@@ -59,6 +62,8 @@ export interface AuthStorageOptions {
     /** Internal process-memory credential store, retained across reload for the same host. */
     sessionEntries?: Map<string, string>;
     credentialStore?: 'encrypted-file';
+    /** Persistent cohort-proof backend when ordinary OAuth remains session-local. */
+    cohortCredentialStore?: 'encrypted-file';
 }
 export declare class OAuthCredentialStoreError extends Error {
     readonly operation: 'read' | 'write' | 'remove';

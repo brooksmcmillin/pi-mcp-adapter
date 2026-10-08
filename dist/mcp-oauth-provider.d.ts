@@ -8,6 +8,7 @@ import { type AddClientAuthentication, type OAuthClientInformationContext, type 
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/client";
 import { type AuthStorageOptions, type OAuthAuthority } from "./mcp-auth.ts";
 import { type OAuthFetch } from "./mcp-auth-fetch.ts";
+import { type CodingEnrollmentConfig } from "./mcp-coding-auth.ts";
 declare const DEFAULT_OAUTH_CALLBACK_HOST = "127.0.0.1";
 declare const DEFAULT_OAUTH_CALLBACK_PORT = 19876;
 declare const DEFAULT_OAUTH_CALLBACK_PATH = "/callback";
@@ -18,6 +19,7 @@ export declare function getOAuthCallbackPath(): string;
 export declare function setOAuthCallbackPath(path: string): void;
 /** Configuration options for OAuth */
 export interface McpOAuthConfig {
+    codingEnrollment?: CodingEnrollmentConfig;
     grantType?: "authorization_code" | "client_credentials" | "device_code";
     clientId?: string;
     clientSecret?: string;
@@ -62,8 +64,14 @@ export declare class McpOAuthProvider implements OAuthClientProvider {
     private lastSavedAccessToken;
     private pendingAuthAccessToken;
     private readonly assertAuthority;
+    private readonly coding?;
+    private pendingCodingCredentials;
+    private pendingCodingAuthority;
+    private codingError;
     constructor(serverName: string, serverUrl: string, config: McpOAuthConfig, callbacks: McpOAuthCallbacks, storageOptions?: AuthStorageOptions, runtimeSignal?: AbortSignal | undefined, initialState?: string, authority?: OAuthAuthority);
     setAuthFetch(fetchFn: OAuthFetch): void;
+    /** Use the same credential-aware fetch in the SDK and transport. */
+    getAuthFetch(): OAuthFetch;
     private get usesClientCredentials();
     private get discoveredIssuer();
     deactivate(): void;
