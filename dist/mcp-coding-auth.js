@@ -29,6 +29,20 @@ function launchStates(storage) {
     }
     return states;
 }
+export function getRetainedCodingConfig(name, url, storage) {
+    if (storage.persistence !== "session" || !storage.sessionEntries)
+        return undefined;
+    const identity = getAuthStorageIdentity(storage);
+    for (const [key, state] of launchStates(storage)) {
+        const [launchName, launchUrl, launchIdentity] = JSON.parse(key);
+        if (launchName === name && launchIdentity === identity && state.selectedConfig) {
+            if (launchUrl !== url)
+                throw new Error("Coding session is bound to a different MCP URL");
+            return { ...state.selectedConfig };
+        }
+    }
+    return undefined;
+}
 export function logoutCodingLaunch(name, storage) {
     if (storage.persistence !== "session" || !storage.sessionEntries)
         return;
@@ -75,6 +89,14 @@ export class CodingAuthClient {
             state = { denied: false };
             launches.set(key, state);
         }
+        // Keep the active binding with the existing host-owned launch state, not
+        // ambient configuration or persisted bearer credentials.
+        for (const [launchKey, launch] of launches) {
+            const [launchName, , identity] = JSON.parse(launchKey);
+            if (launchName === name && identity === getAuthStorageIdentity(storage))
+                launch.selectedConfig = undefined;
+        }
+        state.selectedConfig = { ...config };
         this.state = state;
     }
     parseCredentials(payload) {
@@ -85,6 +107,8 @@ export class CodingAuthClient {
     }
     install(payload, check) {
         check();
+        if (!this.state.selectedConfig)
+            throw new Error("Coding session configuration changed; use the current configuration");
         if (payload.cohort_credential) {
             saveAuthEntry(this.cohortAccount, { cohortCredential: payload.cohort_credential, cohortReference: payload.authorization_ref }, this.url, this.persistent);
         }
@@ -103,8 +127,14 @@ export class CodingAuthClient {
         this.state.credentials = undefined;
     }
     async tokens(fetchFn, check, signal, mode = "ensure") {
-        const assert = () => { check(); signal?.throwIfAborted(); if (this.state.denied)
-            throw new Error(terminal); };
+        const assert = () => {
+            check();
+            signal?.throwIfAborted();
+            if (this.state.denied)
+                throw new Error(terminal);
+            if (!this.state.selectedConfig)
+                throw new Error("Coding session configuration changed; use the current configuration");
+        };
         assert();
         // One rotation per launch, even when different SDK providers overlap.
         if (this.state.pending) {

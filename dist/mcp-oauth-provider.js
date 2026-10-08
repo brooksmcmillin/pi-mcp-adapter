@@ -10,7 +10,7 @@ import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@mod
 import { createOAuthFetch } from "./mcp-auth-fetch.js";
 import { resolveCommandSecret } from "./utils.js";
 import { getAppClientUri, getAppName } from "./agent-dir.js";
-import { CodingAuthClient } from "./mcp-coding-auth.js";
+import { CodingAuthClient, getRetainedCodingConfig } from "./mcp-coding-auth.js";
 /**
  * Client name advertised during Dynamic Client Registration.
  *
@@ -219,12 +219,9 @@ export class McpOAuthProvider {
         if (config.clientId === undefined && config.clientMetadataUrl !== undefined) {
             this.clientMetadataUrl = config.clientMetadataUrl;
         }
-        if (config.codingEnrollment) {
-            if ((config.grantType !== undefined && config.grantType !== "authorization_code") || config.skipIssuerMetadataValidation) {
-                throw new Error("Coding enrollment requires authorization_code and strict issuer validation");
-            }
-            this.coding = new CodingAuthClient(serverName, serverUrl, config.codingEnrollment, storageOptions);
-        }
+        const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, storageOptions);
+        if (codingConfig)
+            this.enableCoding(codingConfig);
         this.authFetch = createOAuthFetch(serverUrl, undefined, runtimeSignal);
         this.setAuthFetch(this.authFetch);
         this.flowState = initialState;
@@ -288,7 +285,28 @@ export class McpOAuthProvider {
         }, { throwIfHeaderResolutionFailed: () => fetchFn.throwIfHeaderResolutionFailed() });
     }
     /** Use the same credential-aware fetch in the SDK and transport. */
-    getAuthFetch() { return this.authFetch; }
+    enableCoding(config) {
+        if ((this.config.grantType !== undefined && this.config.grantType !== "authorization_code") || this.config.skipIssuerMetadataValidation) {
+            throw new Error("Coding enrollment requires authorization_code and strict issuer validation");
+        }
+        this.coding = new CodingAuthClient(this.serverName, this.serverUrl, config, this.storageOptions);
+    }
+    adoptCodingSession() {
+        if (this.coding)
+            return;
+        const config = getRetainedCodingConfig(this.serverName, this.serverUrl, this.storageOptions);
+        if (config) {
+            this.enableCoding(config);
+            this.setAuthFetch(this.authFetch);
+        }
+    }
+    getAuthFetch() {
+        return Object.assign((...args) => {
+            this.adoptCodingSession();
+            return this.authFetch(...args);
+        }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() });
+    }
+    get codingEnrollmentEnabled() { this.adoptCodingSession(); return this.coding !== undefined; }
     get usesClientCredentials() {
         return this.config.grantType === "client_credentials";
     }
@@ -530,6 +548,7 @@ export class McpOAuthProvider {
      */
     async tokens(ctx) {
         this.throwIfInactive();
+        this.adoptCodingSession();
         if (this.coding) {
             this.codingError = undefined;
             const issuer = ctx?.issuer ?? this.discoveredIssuer;
@@ -566,6 +585,7 @@ export class McpOAuthProvider {
      * Save OAuth tokens.
      */
     async saveTokens(tokens) {
+        this.adoptCodingSession();
         if (this.coding) {
             this.throwIfInactive();
             const issuer = this.discoveredIssuer ?? tokens.issuer;

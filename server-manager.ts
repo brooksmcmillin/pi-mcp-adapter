@@ -1736,7 +1736,7 @@ export class McpServerManager {
       | { status: "failed"; client: Client; transport: Transport; error: unknown }
     > => {
       const authProvider = "provider" in authState ? authState.provider : undefined;
-      const coding = definition.oauth !== false && definition.oauth?.codingEnrollment !== undefined;
+      const coding = authProvider?.codingEnrollmentEnabled === true;
       if (coding && authProvider) {
         authProvider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders,
           combineAbortSignals(this.oauthRuntime?.signal, signal), {

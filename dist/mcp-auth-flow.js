@@ -15,7 +15,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.js";
 import { authenticateDevice } from "./mcp-device-auth.js";
-import { logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.js";
+import { getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.js";
 function pluginAwareOAuthHeaders(definition) {
     return oauthHeaderResolver(definition?.headers, {
         literal: definition ? isBuiltInAgentPlugin(definition, "headers") : false,
@@ -992,6 +992,9 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
     const signal = combineAbortSignals(runtime.signal, options.signal);
     throwIfAborted(signal);
     const config = options.definition ? extractOAuthConfig(options.definition) : {};
+    const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions);
+    if (codingConfig)
+        config.codingEnrollment = codingConfig;
     if (config.codingEnrollment) {
         const provider = new McpOAuthProvider(serverName, serverUrl, config, { onRedirect: async () => { } }, authStorageOptions, signal, undefined, authority);
         try {

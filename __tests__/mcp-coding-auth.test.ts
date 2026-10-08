@@ -8,6 +8,7 @@ import { CodingAuthClient, validateCodingConfig, type CodingCredentials } from "
 import { createOAuthFetch } from "../mcp-auth-fetch.ts"
 import { McpOAuthProvider } from "../mcp-oauth-provider.ts"
 import { completeAuthFromInput, createOAuthRuntime, extractOAuthConfig, getValidToken, removeAuth, shutdownOAuth, startAuth } from "../mcp-auth-flow.ts"
+import { getMcpOAuthTokensForUrl } from "../oauth.ts"
 import { captureOAuthAuthority, getAuthEntry, getAuthStorageOptions, type AuthStorageOptions } from "../mcp-auth.ts"
 
 // Byte-identical contract from infra@a665b5629c1375f296db7d1be115b1b5dbc24255.
@@ -314,6 +315,67 @@ describe("coding enrollment v1", () => {
       source.closeAllConnections(); target.closeAllConnections()
       await Promise.all([new Promise<void>(resolve => source.close(() => resolve())), new Promise<void>(resolve => target.close(() => resolve()))])
     }
+  })
+
+  it.each([undefined, { oauth: {} }, { oauth: false as const }])("retains coding status for public reads with omitted coding configuration (%j)", async definition => {
+    const b = broker(), c = config(), s = storage(); await initial(s, c)
+    const options = { authStorageOptions: s, ...(definition ? { definition } : {}) }
+    await expect(getMcpOAuthTokensForUrl("broker", url, options)).resolves.toMatchObject({ accessToken: "synthetic-access-1" })
+    b.pause()
+    await expect(getMcpOAuthTokensForUrl("broker", url, options)).rejects.toThrow(/coding\/renew\?authorization_ref=coding_test/)
+    b.renew()
+    await expect(getMcpOAuthTokensForUrl("broker", url, options)).resolves.toMatchObject({ accessToken: "synthetic-access-2" })
+    b.revoked.add("synthetic-enrollment-2")
+    await expect(getMcpOAuthTokensForUrl("broker", url, options)).rejects.toThrow(/revoked/)
+    await expect(getMcpOAuthTokensForUrl("broker", url, options)).rejects.toThrow(/revoked/)
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(0)
+    expect(b.requests.filter(r => r.route === "/broker/token")).toHaveLength(1)
+  })
+
+  it("adopts a later enrollment in existing providers and previously captured SDK fetches", async () => {
+    const b = broker(), c = config(), s = storage()
+    const provider = new McpOAuthProvider("broker", url, {}, { onRedirect: vi.fn() }, s)
+    const fetchFn = provider.getAuthFetch()
+    await initial(s, c)
+    await expect(provider.tokens({ issuer: `${origin}/broker` })).resolves.toMatchObject({ access_token: "synthetic-access-1" })
+    b.pause()
+    await expect(provider.tokens()).rejects.toThrow(/paused/)
+    await expect(fetchFn(`${origin}/broker/token`, { method: "POST", body: "grant_type=refresh_token&refresh_token=synthetic-refresh-1" })).rejects.toThrow(/paused/)
+    b.renew()
+    expect((await (await fetchFn(`${origin}/broker/token`, { method: "POST", body: "grant_type=refresh_token&refresh_token=synthetic-refresh-1" })).json()).access_token).toBe("synthetic-access-2")
+    expect(provider.codingEnrollmentEnabled).toBe(true)
+    expect(b.requests.filter(r => r.route === "/broker/token")).toHaveLength(1)
+  })
+
+  it("retains omitted-definition gating across module reload and logout without enabling other launches", async () => {
+    const b = broker(), c = config(), s = storage(); await initial(s, c)
+    vi.resetModules()
+    const { getMcpOAuthTokensForUrl: reloaded } = await import("../oauth.ts")
+    b.pause()
+    await expect(reloaded("broker", url, { authStorageOptions: s })).rejects.toThrow(/paused/)
+    const before = b.requests.length
+    await expect(reloaded("broker", url, { authStorageOptions: storage() })).resolves.toBeUndefined()
+    await expect(reloaded("other", url, { authStorageOptions: s })).resolves.toBeUndefined()
+    expect(b.requests).toHaveLength(before)
+    await removeAuth("broker", { authStorageOptions: s })
+    await expect(reloaded("broker", url, { authStorageOptions: s })).rejects.toThrow(/revoked/)
+    expect(getAuthEntry("broker", s)).toBeUndefined()
+    expect(b.requests).toHaveLength(before)
+  })
+
+  it("binds implicit reads to the latest URL/slot and fences obsolete providers", async () => {
+    const b = broker(), c = config(), s = storage(); await initial(s, c)
+    const old = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)
+    const otherSlot = { version: 1 as const, cohort: "new-slot" }
+    new CodingAuthClient("broker", url, otherSlot, s)
+    const before = b.requests.length
+    await expect(getMcpOAuthTokensForUrl("broker", url, { authStorageOptions: s })).resolves.toBeUndefined()
+    await expect(old.tokens()).rejects.toThrow(/configuration changed/)
+    const otherUrl = "https://other.example/broker/mcp"
+    new CodingAuthClient("broker", otherUrl, otherSlot, s)
+    await expect(getMcpOAuthTokensForUrl("broker", url, { authStorageOptions: s })).rejects.toThrow(/different MCP URL/)
+    await expect(getMcpOAuthTokensForUrl("broker", otherUrl, { authStorageOptions: s })).resolves.toBeUndefined()
+    expect(b.requests).toHaveLength(before)
   })
 
   it("does not add coding endpoints or change ordinary OAuth defaults", () => {

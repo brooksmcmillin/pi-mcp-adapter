@@ -186,7 +186,14 @@ The contract is `POST JSON` to `/broker/coding/enroll` (`cohort_credential`),
 `/broker/coding/status` (`enrollment_token`) and `/broker/coding/replace`
 (`enrollment_token`, `refresh_token`). Each rotation is serialized per launch;
 proofs are never in URLs, and credential-bearing redirects are rejected.
-Status is checked before using coding credentials. Lost rotation responses are
+Status is checked before using coding credentials. The host retains the selected
+URL/slot identity alongside session-only launch state, so async valid-token reads
+(including the public OAuth helper with omitted configuration) keep this gate.
+It is not ambient config discovery and does not opt other names or launches in.
+URL/slot rebinding fences obsolete providers; removing coding config from a read
+does not reinterpret existing coding credentials as ordinary OAuth credentials.
+Local snapshot inspection is not a server-validity check. Explicit service
+headers are still required where the endpoint needs them. Lost rotation responses are
 not blindly retried or recovered with an old bearer: a consumed proof requires
 fresh human consent. API v1, strict issuer validation, `/broker/mcp`, session
 persistence and authorization-code consent are required. Missing/unsupported

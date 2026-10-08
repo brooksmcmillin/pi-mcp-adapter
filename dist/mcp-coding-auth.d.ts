@@ -18,6 +18,7 @@ declare const credentialSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type CodingCredentials = z.infer<typeof credentialSchema>;
 type RecoveryMode = "ensure" | "status" | "replace";
+export declare function getRetainedCodingConfig(name: string, url: string, storage: AuthStorageOptions): CodingEnrollmentConfig | undefined;
 export declare function logoutCodingLaunch(name: string, storage: AuthStorageOptions): void;
 export declare function validateCodingConfig(value: unknown): CodingEnrollmentConfig;
 /** Cohort names select private secure-store entries; they are never authority. */

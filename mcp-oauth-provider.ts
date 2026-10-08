@@ -36,7 +36,7 @@ import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@mod
 import { createOAuthFetch, type OAuthFetch } from "./mcp-auth-fetch.ts"
 import { resolveCommandSecret } from "./utils.ts"
 import { getAppClientUri, getAppName } from "./agent-dir.ts"
-import { CodingAuthClient, type CodingCredentials, type CodingEnrollmentConfig } from "./mcp-coding-auth.ts"
+import { CodingAuthClient, getRetainedCodingConfig, type CodingCredentials, type CodingEnrollmentConfig } from "./mcp-coding-auth.ts"
 
 /**
  * Client name advertised during Dynamic Client Registration.
@@ -272,7 +272,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private lastSavedAccessToken: string | undefined
   private pendingAuthAccessToken: string | undefined
   private readonly assertAuthority: OAuthAuthority
-  private readonly coding?: CodingAuthClient
+  private coding: CodingAuthClient | undefined
   private pendingCodingCredentials: CodingCredentials | undefined
   private pendingCodingAuthority: OAuthAuthority | undefined
   private codingError: Error | undefined
@@ -292,12 +292,8 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (config.clientId === undefined && config.clientMetadataUrl !== undefined) {
       this.clientMetadataUrl = config.clientMetadataUrl
     }
-    if (config.codingEnrollment) {
-      if ((config.grantType !== undefined && config.grantType !== "authorization_code") || config.skipIssuerMetadataValidation) {
-        throw new Error("Coding enrollment requires authorization_code and strict issuer validation")
-      }
-      this.coding = new CodingAuthClient(serverName, serverUrl, config.codingEnrollment, storageOptions)
-    }
+    const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, storageOptions)
+    if (codingConfig) this.enableCoding(codingConfig)
     this.authFetch = createOAuthFetch(serverUrl, undefined, runtimeSignal)
     this.setAuthFetch(this.authFetch)
     this.flowState = initialState
@@ -355,7 +351,26 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   /** Use the same credential-aware fetch in the SDK and transport. */
-  getAuthFetch(): OAuthFetch { return this.authFetch }
+  private enableCoding(config: CodingEnrollmentConfig): void {
+    if ((this.config.grantType !== undefined && this.config.grantType !== "authorization_code") || this.config.skipIssuerMetadataValidation) {
+      throw new Error("Coding enrollment requires authorization_code and strict issuer validation")
+    }
+    this.coding = new CodingAuthClient(this.serverName, this.serverUrl, config, this.storageOptions)
+  }
+
+  private adoptCodingSession(): void {
+    if (this.coding) return
+    const config = getRetainedCodingConfig(this.serverName, this.serverUrl, this.storageOptions)
+    if (config) { this.enableCoding(config); this.setAuthFetch(this.authFetch) }
+  }
+
+  getAuthFetch(): OAuthFetch {
+    return Object.assign((...args: Parameters<OAuthFetch>) => {
+      this.adoptCodingSession()
+      return this.authFetch(...args)
+    }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() })
+  }
+  get codingEnrollmentEnabled(): boolean { this.adoptCodingSession(); return this.coding !== undefined }
 
   private get usesClientCredentials(): boolean {
     return this.config.grantType === "client_credentials"
@@ -631,6 +646,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    */
   async tokens(ctx?: OAuthClientInformationContext): Promise<OAuthTokens | undefined> {
     this.throwIfInactive()
+    this.adoptCodingSession()
     if (this.coding) {
       this.codingError = undefined
       const issuer = ctx?.issuer ?? this.discoveredIssuer
@@ -668,6 +684,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * Save OAuth tokens.
    */
   async saveTokens(tokens: OAuthTokens): Promise<void> {
+    this.adoptCodingSession()
     if (this.coding) {
       this.throwIfInactive()
       const issuer = this.discoveredIssuer ?? (tokens as IssuerBoundTokens).issuer

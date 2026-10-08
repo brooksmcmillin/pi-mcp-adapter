@@ -25,7 +25,7 @@ const unsupported = "Broker coding API v1 is required; upgrade the broker or dis
 const terminal = "Coding enrollment revoked or invalid; start fresh human consent."
 
 type RecoveryMode = "ensure" | "status" | "replace"
-type LaunchState = { credentials?: CodingCredentials | undefined; denied: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode }
+type LaunchState = { credentials?: CodingCredentials | undefined; denied: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode; selectedConfig?: CodingEnrollmentConfig | undefined }
 const REGISTRY = Symbol.for("pi-mcp-adapter.coding-launches.v1")
 const host = globalThis as typeof globalThis & { [REGISTRY]?: WeakMap<object, Map<string, LaunchState>> }
 const registry = host[REGISTRY] ??= new WeakMap<object, Map<string, LaunchState>>()
@@ -35,6 +35,19 @@ function launchStates(storage: AuthStorageOptions): Map<string, LaunchState> {
   let states = registry.get(storage.sessionEntries)
   if (!states) { states = new Map(); registry.set(storage.sessionEntries, states) }
   return states
+}
+
+export function getRetainedCodingConfig(name: string, url: string, storage: AuthStorageOptions): CodingEnrollmentConfig | undefined {
+  if (storage.persistence !== "session" || !storage.sessionEntries) return undefined
+  const identity = getAuthStorageIdentity(storage)
+  for (const [key, state] of launchStates(storage)) {
+    const [launchName, launchUrl, launchIdentity] = JSON.parse(key) as string[]
+    if (launchName === name && launchIdentity === identity && state.selectedConfig) {
+      if (launchUrl !== url) throw new Error("Coding session is bound to a different MCP URL")
+      return { ...state.selectedConfig }
+    }
+  }
+  return undefined
 }
 
 export function logoutCodingLaunch(name: string, storage: AuthStorageOptions): void {
@@ -71,6 +84,13 @@ export class CodingAuthClient {
     const launches = launchStates(storage)
     let state = launches.get(key)
     if (!state) { state = { denied: false }; launches.set(key, state) }
+    // Keep the active binding with the existing host-owned launch state, not
+    // ambient configuration or persisted bearer credentials.
+    for (const [launchKey, launch] of launches) {
+      const [launchName, , identity] = JSON.parse(launchKey) as string[]
+      if (launchName === name && identity === getAuthStorageIdentity(storage)) launch.selectedConfig = undefined
+    }
+    state.selectedConfig = { ...config }
     this.state = state
   }
 
@@ -82,6 +102,7 @@ export class CodingAuthClient {
 
   install(payload: CodingCredentials, check: OAuthAuthority): void {
     check()
+    if (!this.state.selectedConfig) throw new Error("Coding session configuration changed; use the current configuration")
     if (payload.cohort_credential) {
       saveAuthEntry(this.cohortAccount, { cohortCredential: payload.cohort_credential, cohortReference: payload.authorization_ref }, this.url, this.persistent)
     }
@@ -103,7 +124,11 @@ export class CodingAuthClient {
   }
 
   async tokens(fetchFn: FetchLike, check: OAuthAuthority, signal?: AbortSignal, mode: RecoveryMode = "ensure"): Promise<StoredTokens | null> {
-    const assert = () => { check(); signal?.throwIfAborted(); if (this.state.denied) throw new Error(terminal) }
+    const assert = () => {
+      check(); signal?.throwIfAborted()
+      if (this.state.denied) throw new Error(terminal)
+      if (!this.state.selectedConfig) throw new Error("Coding session configuration changed; use the current configuration")
+    }
     assert()
     // One rotation per launch, even when different SDK providers overlap.
     if (this.state.pending) {

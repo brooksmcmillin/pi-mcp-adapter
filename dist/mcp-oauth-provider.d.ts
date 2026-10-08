@@ -64,14 +64,17 @@ export declare class McpOAuthProvider implements OAuthClientProvider {
     private lastSavedAccessToken;
     private pendingAuthAccessToken;
     private readonly assertAuthority;
-    private readonly coding?;
+    private coding;
     private pendingCodingCredentials;
     private pendingCodingAuthority;
     private codingError;
     constructor(serverName: string, serverUrl: string, config: McpOAuthConfig, callbacks: McpOAuthCallbacks, storageOptions?: AuthStorageOptions, runtimeSignal?: AbortSignal | undefined, initialState?: string, authority?: OAuthAuthority);
     setAuthFetch(fetchFn: OAuthFetch): void;
     /** Use the same credential-aware fetch in the SDK and transport. */
+    private enableCoding;
+    private adoptCodingSession;
     getAuthFetch(): OAuthFetch;
+    get codingEnrollmentEnabled(): boolean;
     private get usesClientCredentials();
     private get discoveredIssuer();
     deactivate(): void;

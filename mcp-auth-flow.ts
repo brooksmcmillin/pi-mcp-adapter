@@ -50,7 +50,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts"
 import { abortable, throwIfAborted } from "./abort.ts"
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts"
 import { authenticateDevice, type DeviceAuthOptions } from "./mcp-device-auth.ts"
-import { logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.ts"
+import { getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.ts"
 
 /** Auth status for a server */
 export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
@@ -1186,6 +1186,8 @@ export async function getValidToken(
   const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
   const config = options.definition ? extractOAuthConfig(options.definition) : {}
+  const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions)
+  if (codingConfig) config.codingEnrollment = codingConfig
   if (config.codingEnrollment) {
     const provider = new McpOAuthProvider(serverName, serverUrl, config, { onRedirect: async () => {} }, authStorageOptions, signal, undefined, authority)
     try {

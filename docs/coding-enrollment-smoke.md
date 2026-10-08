@@ -65,8 +65,8 @@ replay, or broker implementation changes belong to this delivery.
 | --- | --- | --- | --- |
 | Startup | Human PKCE response → OAuth provider → private cohort store | URL/slot selects proof; human approval alone grants authority | SDK code exchange and URL/slot isolation regressions; cohort enrollment smoke |
 | Pause | Broker coding status → provider/transport/auth helpers | Enrollment proof works without a live bearer; only curated renewal route is shown | Common-route pause tests; multi-process pause smoke |
-| Continue | Human renewal → status → per-launch replacement | Both enrollment/refresh proofs rotate atomically; per-launch queue and installation fence | Concurrency, SDK-context/Request-input, stale-install and idle/absolute expiry tests |
-| Reload | Host-owned weak registry → new provider/runtime | Completed session proofs retained; old runtime work cannot install late | Module-reload and cohort-backend selection regressions; existing host-session tests |
+| Continue | Human renewal → status → per-launch replacement | Both enrollment/refresh proofs rotate atomically; per-launch queue and installation fence | Concurrency, SDK-context/Request-input/omitted-definition public reads, stale-install and idle/absolute expiry tests |
+| Reload | Host-owned weak registry → new provider/runtime | Completed session proofs retained; old runtime work cannot install late | Module-reload, retained identity/URL-slot rebinding and cohort-backend selection regressions; existing host-session tests |
 | Logout/cancel | Revocation generation / runtime signal → pending rotation | No late install, no terminal-proof fallback to cohort enrollment | Logout, abort and deactivation regressions |
 | Replay | Lost replacement response → later status | No idempotent retrieval promise; consumed proof is terminal | Consumed-response-loss/no-replay and terminal no-fallback regressions |
 

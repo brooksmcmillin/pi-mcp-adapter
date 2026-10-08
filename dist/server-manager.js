@@ -1404,7 +1404,7 @@ export class McpServerManager {
                 : bearerFetch;
             const attempt = async (kind) => {
                 const authProvider = "provider" in authState ? authState.provider : undefined;
-                const coding = definition.oauth !== false && definition.oauth?.codingEnrollment !== undefined;
+                const coding = authProvider?.codingEnrollmentEnabled === true;
                 if (coding && authProvider) {
                     authProvider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders, combineAbortSignals(this.oauthRuntime?.signal, signal), {
                         timeout: false, ...(requestFetch ? { delegate: requestFetch } : {}),
