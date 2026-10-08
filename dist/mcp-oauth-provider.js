@@ -10,6 +10,7 @@ import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@mod
 import { createOAuthFetch } from "./mcp-auth-fetch.js";
 import { resolveCommandSecret } from "./utils.js";
 import { getAppClientUri, getAppName } from "./agent-dir.js";
+import { CodingAuthClient, getRetainedCodingConfig } from "./mcp-coding-auth.js";
 /**
  * Client name advertised during Dynamic Client Registration.
  *
@@ -202,6 +203,10 @@ export class McpOAuthProvider {
     lastSavedAccessToken;
     pendingAuthAccessToken;
     assertAuthority;
+    coding;
+    pendingCodingCredentials;
+    pendingCodingAuthority;
+    codingError;
     constructor(serverName, serverUrl, config, callbacks, storageOptions = {}, runtimeSignal, initialState, authority) {
         this.serverName = serverName;
         this.serverUrl = serverUrl;
@@ -214,7 +219,11 @@ export class McpOAuthProvider {
         if (config.clientId === undefined && config.clientMetadataUrl !== undefined) {
             this.clientMetadataUrl = config.clientMetadataUrl;
         }
+        const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, storageOptions);
+        if (codingConfig)
+            this.enableCoding(codingConfig);
         this.authFetch = createOAuthFetch(serverUrl, undefined, runtimeSignal);
+        this.setAuthFetch(this.authFetch);
         this.flowState = initialState;
         // The SDK uses redirectUrl presence to select refresh rather than a new
         // non-interactive token request. Device pairing never binds this callback.
@@ -223,8 +232,81 @@ export class McpOAuthProvider {
             : config.redirectUri ?? `http://${DEFAULT_OAUTH_CALLBACK_HOST}:${getOAuthCallbackPort()}${getOAuthCallbackPath()}`;
     }
     setAuthFetch(fetchFn) {
-        this.authFetch = fetchFn;
+        if (!this.coding) {
+            this.authFetch = fetchFn;
+            return;
+        }
+        const coding = this.coding;
+        this.authFetch = Object.assign(async (input, init) => {
+            const request = input instanceof Request ? input : undefined;
+            const signal = init?.signal ?? request?.signal ?? this.runtimeSignal;
+            const check = () => { this.throwIfInactive(); signal?.throwIfAborted(); };
+            check();
+            const url = new URL(request ? request.url : String(input));
+            const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+            if (url.toString() === `${coding.issuer}/token` && method === "POST") {
+                // Normalize all FetchLike body representations without consuming the caller's Request.
+                const body = await new Request(request ? request.clone() : input, init).text();
+                check();
+                const params = new URLSearchParams(body);
+                if (params.get("grant_type") === "refresh_token") {
+                    try {
+                        const tokens = await coding.tokens(fetchFn, check, signal ?? undefined, "replace");
+                        check();
+                        if (!tokens)
+                            throw new Error("Coding enrollment requires fresh human consent");
+                        return new Response(JSON.stringify({ ...toOAuthTokens(tokens), expires_at: new Date(tokens.expiresAt * 1000).toISOString() }), { headers: { "content-type": "application/json", "cache-control": "no-store" } });
+                    }
+                    catch (error) {
+                        this.codingError = error instanceof Error ? error : new Error("Coding credential recovery failed");
+                        throw this.codingError;
+                    }
+                }
+                if (params.get("grant_type") === "authorization_code") {
+                    const response = await fetchFn(input, { ...init, redirect: "error" });
+                    check();
+                    if (response.ok) {
+                        let payload;
+                        try {
+                            payload = await response.clone().json();
+                        }
+                        catch {
+                            throw new Error("Invalid coding OAuth token response");
+                        }
+                        check();
+                        this.pendingCodingCredentials = coding.parseCredentials(payload);
+                        this.pendingCodingAuthority = check;
+                    }
+                    check();
+                    return response;
+                }
+            }
+            return fetchFn(input, init);
+        }, { throwIfHeaderResolutionFailed: () => fetchFn.throwIfHeaderResolutionFailed() });
     }
+    /** Use the same credential-aware fetch in the SDK and transport. */
+    enableCoding(config) {
+        if ((this.config.grantType !== undefined && this.config.grantType !== "authorization_code") || this.config.skipIssuerMetadataValidation) {
+            throw new Error("Coding enrollment requires authorization_code and strict issuer validation");
+        }
+        this.coding = new CodingAuthClient(this.serverName, this.serverUrl, config, this.storageOptions);
+    }
+    adoptCodingSession() {
+        if (this.coding)
+            return;
+        const config = getRetainedCodingConfig(this.serverName, this.serverUrl, this.storageOptions);
+        if (config) {
+            this.enableCoding(config);
+            this.setAuthFetch(this.authFetch);
+        }
+    }
+    getAuthFetch() {
+        return Object.assign((...args) => {
+            this.adoptCodingSession();
+            return this.authFetch(...args);
+        }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() });
+    }
+    get codingEnrollmentEnabled() { this.adoptCodingSession(); return this.coding !== undefined; }
     get usesClientCredentials() {
         return this.config.grantType === "client_credentials";
     }
@@ -234,6 +316,8 @@ export class McpOAuthProvider {
     }
     deactivate() {
         this.active = false;
+        this.pendingCodingCredentials = undefined;
+        this.pendingCodingAuthority = undefined;
         this.invalidatedAccessToken = undefined;
         this.invalidatedClientId = undefined;
         this.staleRedirectClientId = undefined;
@@ -348,6 +432,10 @@ export class McpOAuthProvider {
         // Keep client registration associated with this in-flight flow even if
         // another runtime writes the shared persistent entry for the same name.
         const clientInfo = this.flowClientInfo ?? stored?.clientInfo;
+        // Enrolled launches do not need to register an OAuth client just to replace proofs.
+        if (this.coding && stored?.tokens && !clientInfo) {
+            return { client_id: "pi-coding-enrollment-v1", issuer: this.coding.issuer };
+        }
         if (clientInfo?.clientId === this.invalidatedClientId)
             return undefined;
         const clientMetadataUrl = this.clientMetadataUrl;
@@ -460,6 +548,16 @@ export class McpOAuthProvider {
      */
     async tokens(ctx) {
         this.throwIfInactive();
+        this.adoptCodingSession();
+        if (this.coding) {
+            this.codingError = undefined;
+            const issuer = ctx?.issuer ?? this.discoveredIssuer;
+            if (issuer !== undefined && !issuersMatch(issuer, this.coding.issuer))
+                throw new Error("Coding OAuth issuer mismatch");
+            const tokens = await this.coding.tokens(this.authFetch, () => this.throwIfInactive(), this.runtimeSignal, ctx ? "status" : "ensure");
+            this.throwIfInactive();
+            return tokens ? toOAuthTokens(tokens) : undefined;
+        }
         // Once this provider rejects a token, bypass its process-local cache until
         // another process replaces that token in shared secure storage.
         if (this.invalidatedAccessToken !== undefined) {
@@ -487,6 +585,29 @@ export class McpOAuthProvider {
      * Save OAuth tokens.
      */
     async saveTokens(tokens) {
+        this.adoptCodingSession();
+        if (this.coding) {
+            this.throwIfInactive();
+            const issuer = this.discoveredIssuer ?? tokens.issuer;
+            if (issuer !== undefined && !issuersMatch(issuer, this.coding.issuer))
+                throw new Error("Coding OAuth issuer mismatch");
+            const pending = this.pendingCodingCredentials;
+            if (pending) {
+                if (pending.access_token !== tokens.access_token || pending.refresh_token !== tokens.refresh_token)
+                    throw new Error("Coding OAuth credential response mismatch");
+                this.pendingCodingAuthority();
+                this.coding.install(pending, this.pendingCodingAuthority);
+                this.pendingCodingCredentials = undefined;
+                this.pendingCodingAuthority = undefined;
+            }
+            else if (getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)?.tokens?.accessToken !== tokens.access_token) {
+                throw new Error("Coding credentials must come from broker API v1");
+            }
+            this.invalidatedAccessToken = undefined;
+            this.lastSavedAccessToken = tokens.access_token;
+            this.flowDiscoveryState = undefined;
+            return;
+        }
         const issuer = this.discoveredIssuer ?? tokens.issuer;
         const storedTokens = {
             accessToken: tokens.access_token,
@@ -518,6 +639,8 @@ export class McpOAuthProvider {
      * flow, which library hosts cannot complete in-process.
      */
     async redirectToAuthorization(authorizationUrl) {
+        if (this.codingError)
+            throw this.codingError;
         if (this.usesClientCredentials) {
             throw new Error("redirectToAuthorization is not used for client_credentials flow");
         }
@@ -581,6 +704,8 @@ export class McpOAuthProvider {
      * @throws UnauthorizedError if no flow is in progress (see redirectToAuthorization)
      */
     async state() {
+        if (this.codingError)
+            throw this.codingError;
         if (this.usesClientCredentials) {
             throw new Error("state is not used for client_credentials flow");
         }
@@ -598,6 +723,7 @@ export class McpOAuthProvider {
         this.throwIfInactive();
         switch (type) {
             case "all":
+                this.coding?.logout();
                 this.flowClientInfo = undefined;
                 this.flowCodeVerifier = undefined;
                 this.flowDiscoveryState = undefined;

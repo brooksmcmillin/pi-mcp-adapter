@@ -183,6 +183,12 @@ await updateMcpOAuthTokensForUrl("jira", "https://jira.example.com/mcp", { acces
 
 The public subpath exposes only token read/update helpers plus a status helper. The async read path uses the adapter's refresh logic before it returns tokens. For a service-protected endpoint or a pre-registered OAuth client, pass the explicit refresh configuration as `getMcpOAuthTokensForUrl(name, url, { definition: { headers, oauth } })`. This optional configuration is never loaded from ambient config or stored with the tokens; headers are bound to the supplied MCP URL's origin. The helpers keep secure-store storage, URL binding, refresh persistence, chunk handling, legacy import, and fail-closed credential-store errors. They do not expose client registration secrets, PKCE verifiers, or OAuth state.
 
+For an already coding-enrolled host session, pass its `authStorageOptions` to
+reuse the session's retained URL/slot identity. Async reads still check coding
+pause/revocation and replace expired credentials when `definition` is omitted;
+no extra consent or ambient config lookup occurs. Other launches are not opted
+in. `inspectMcpOAuthTokensForUrl` is a local snapshot, not server authorization.
+
 ## Host-managed embedding
 
 Use `pi-mcp-adapter/host-managed` when an application embeds Pi and owns the MCP connection itself: it builds the transports, holds the credentials, records each call before it runs, and decides when the adapter starts and stops. For an ordinary integration that only supplies MCP configuration, use `createMcpAdapter` instead.

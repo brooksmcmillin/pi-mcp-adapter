@@ -127,6 +127,9 @@ export interface AuthEntry {
   clientInfo?: StoredClientInfo;
   codeVerifier?: string;
   oauthState?: string;
+  /** Private broker cohort proof; never an access or refresh token. */
+  cohortCredential?: string;
+  cohortReference?: string;
   serverUrl?: string; // Track the URL these credentials are for
 }
 
@@ -140,6 +143,8 @@ export interface AuthStorageOptions {
   /** Internal process-memory credential store, retained across reload for the same host. */
   sessionEntries?: Map<string, string>;
   credentialStore?: 'encrypted-file';
+  /** Persistent cohort-proof backend when ordinary OAuth remains session-local. */
+  cohortCredentialStore?: 'encrypted-file';
 }
 
 export class OAuthCredentialStoreError extends Error {
@@ -685,13 +690,18 @@ export function getAuthStorageOptions(
         registry.set(sessionOwner, stores);
       }
       const existing = stores.get(namespace);
-      if (existing) return existing;
+      if (existing) {
+        if (oauthCredentialStore === 'encrypted-file') existing.cohortCredentialStore = 'encrypted-file';
+        else delete existing.cohortCredentialStore;
+        return existing;
+      }
     }
     const options: AuthStorageOptions = {
       ...(baseDir ? { baseDir } : {}),
       persistence: 'session',
       sessionId: randomUUID(),
       sessionEntries: new Map<string, string>(),
+      ...(oauthCredentialStore === 'encrypted-file' ? { cohortCredentialStore: 'encrypted-file' as const } : {}),
     };
     stores?.set(namespace, options);
     return options;
@@ -762,7 +772,9 @@ function toAuthEntry(value: unknown): AuthEntry | undefined {
   const codeVerifier = optionalString(entry.codeVerifier);
   const oauthState = optionalString(entry.oauthState);
   const serverUrl = optionalString(entry.serverUrl);
-  if (codeVerifier === null || oauthState === null || serverUrl === null) return undefined;
+  const cohortCredential = optionalString(entry.cohortCredential);
+  const cohortReference = optionalString(entry.cohortReference);
+  if (codeVerifier === null || oauthState === null || serverUrl === null || cohortCredential === null || cohortReference === null) return undefined;
 
   const tokens = entry.tokens === undefined ? undefined : toStoredTokens(entry.tokens);
   const clientInfo = entry.clientInfo === undefined ? undefined : toStoredClientInfo(entry.clientInfo);
@@ -774,6 +786,8 @@ function toAuthEntry(value: unknown): AuthEntry | undefined {
   if (codeVerifier !== undefined) authEntry.codeVerifier = codeVerifier;
   if (oauthState !== undefined) authEntry.oauthState = oauthState;
   if (serverUrl !== undefined) authEntry.serverUrl = serverUrl;
+  if (cohortCredential !== undefined) authEntry.cohortCredential = cohortCredential;
+  if (cohortReference !== undefined) authEntry.cohortReference = cohortReference;
   return authEntry;
 }
 

@@ -397,6 +397,8 @@ export type ContentBlock = TextContent | ImageContent;
 
 // OAuth configuration (SDK handles auto-discovery and dynamic registration)
 export interface OAuthConfig {
+  /** Opt-in broker API v1; cohort is a non-secret private credential-store slot. Requires session persistence. */
+  codingEnrollment?: { version: 1; cohort: string };
   /** OAuth grant type (defaults to authorization_code) */
   grantType?: "authorization_code" | "client_credentials" | "device_code";
   /** Pre-registered client ID (optional, dynamic registration used if not provided) */

@@ -1356,7 +1356,7 @@ export class McpServerManager {
                 }
                 if (!oauthAuthority)
                     throw new Error(`Missing OAuth authority for ${serverName}`);
-                const provider = new McpOAuthProvider(serverName, serverUrl, extractOAuthConfig(definition), { onRedirect: async () => { } }, this.authStorageOptions, this.oauthRuntime?.signal, undefined, oauthAuthority);
+                const provider = new McpOAuthProvider(serverName, serverUrl, extractOAuthConfig(definition), { onRedirect: async () => { } }, this.authStorageOptions, combineAbortSignals(this.oauthRuntime?.signal, signal), undefined, oauthAuthority);
                 provider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders, combineAbortSignals(this.oauthRuntime?.signal, signal), {
                     ...(caFetch ? { delegate: caFetch.fetch } : {}),
                 }));
@@ -1404,6 +1404,13 @@ export class McpServerManager {
                 : bearerFetch;
             const attempt = async (kind) => {
                 const authProvider = "provider" in authState ? authState.provider : undefined;
+                const coding = authProvider?.codingEnrollmentEnabled === true;
+                if (coding && authProvider) {
+                    authProvider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders, combineAbortSignals(this.oauthRuntime?.signal, signal), {
+                        timeout: false, ...(requestFetch ? { delegate: requestFetch } : {}),
+                    }));
+                }
+                const activeFetch = coding && authProvider ? authProvider.getAuthFetch() : requestFetch;
                 let sseFetchFailure;
                 const sseFailureCodes = kind !== "sse" ? []
                     : isLoopbackUrl(serverUrl) ? ["ECONNREFUSED"]
@@ -1412,7 +1419,7 @@ export class McpServerManager {
                 const transportFetch = sseFailureCodes.length > 0
                     ? async (input, init) => {
                         try {
-                            return await (requestFetch ?? globalThis.fetch)(input, init);
+                            return await (activeFetch ?? globalThis.fetch)(input, init);
                         }
                         catch (error) {
                             // EventSource discards the fetch cause before the SDK creates SseError.
@@ -1421,7 +1428,7 @@ export class McpServerManager {
                             throw error;
                         }
                     }
-                    : requestFetch;
+                    : activeFetch;
                 const transportOptions = {
                     ...(requestInit !== undefined ? { requestInit } : {}),
                     ...(transportFetch !== undefined ? { fetch: transportFetch } : {}),

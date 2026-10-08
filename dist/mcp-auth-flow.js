@@ -15,6 +15,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.js";
 import { authenticateDevice } from "./mcp-device-auth.js";
+import { getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.js";
 function pluginAwareOAuthHeaders(definition) {
     return oauthHeaderResolver(definition?.headers, {
         literal: definition ? isBuiltInAgentPlugin(definition, "headers") : false,
@@ -101,6 +102,8 @@ export function extractOAuthConfig(definition) {
         return {};
     }
     const config = {};
+    if (definition.oauth?.codingEnrollment !== undefined)
+        config.codingEnrollment = validateCodingConfig(definition.oauth.codingEnrollment);
     if (definition.oauth?.grantType !== undefined)
         config.grantType = definition.oauth.grantType;
     if (definition.oauth?.clientId !== undefined) {
@@ -361,6 +364,13 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
     const explainRejection = (error) => {
         throw error instanceof RegistrationRejectedError ? explainRegistrationRejection(error, serverUrl) : error;
     };
+    if (config.codingEnrollment) {
+        const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) });
+        authority();
+        throwIfAborted(signal);
+        if (existing)
+            return { authorizationUrl: "" };
+    }
     if (config.grantType === "device_code") {
         const key = getPendingAuthKey(serverName, authStorageOptions);
         runtimeState.deviceAuths.get(key)?.controller.abort(new Error("Device OAuth pairing replaced"));
@@ -510,7 +520,7 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
         const discovery = applyOAuthConfig(await probeAuthDiscovery(serverUrl, definition, signal), config);
         authority();
         throwIfAborted(signal);
-        const result = await abortable(runSdkAuth(authProvider, { serverUrl, ...discovery, fetchFn }).catch(explainRejection), signal);
+        const result = await abortable(runSdkAuth(authProvider, { serverUrl, ...discovery, fetchFn: authProvider.getAuthFetch() }).catch(explainRejection), signal);
         authority();
         throwIfAborted(signal);
         if (result === "AUTHORIZED") {
@@ -820,7 +830,7 @@ export async function completeAuth(serverName, authorizationCode, options = {}) 
             authorizationCode: code,
             ...(iss === undefined ? {} : { iss }),
             ...pendingAuth.discovery,
-            fetchFn,
+            fetchFn: pendingAuth.authProvider.getAuthFetch(),
         }), signal);
         pendingAuth.authority();
         throwIfAborted(signal);
@@ -981,6 +991,24 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
     const authStorageOptions = options.authStorageOptions ?? {};
     const signal = combineAbortSignals(runtime.signal, options.signal);
     throwIfAborted(signal);
+    const config = options.definition ? extractOAuthConfig(options.definition) : {};
+    const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions);
+    if (codingConfig)
+        config.codingEnrollment = codingConfig;
+    if (config.codingEnrollment) {
+        const provider = new McpOAuthProvider(serverName, serverUrl, config, { onRedirect: async () => { } }, authStorageOptions, signal, undefined, authority);
+        try {
+            provider.setAuthFetch(createOAuthFetch(serverUrl, pluginAwareOAuthHeaders(options.definition), signal));
+            const tokens = await provider.tokens();
+            authority();
+            throwIfAborted(signal);
+            const stored = getAuthForUrl(serverName, serverUrl, authStorageOptions)?.tokens;
+            return tokens && stored?.accessToken === tokens.access_token ? stored : null;
+        }
+        finally {
+            provider.deactivate();
+        }
+    }
     const entry = await getAuthForUrl(serverName, serverUrl, authStorageOptions);
     if (!hasOAuthAuthority(authority))
         return null;
@@ -1020,7 +1048,7 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
                     serverUrl,
                     ...discovery,
                     ...(options.skipIssuerMetadataValidation === true ? { skipIssuerMetadataValidation: true } : {}),
-                    fetchFn,
+                    fetchFn: authProvider.getAuthFetch(),
                 }), signal);
                 authority();
                 throwIfAborted(signal);
@@ -1071,6 +1099,7 @@ export async function removeAuth(serverName, options = {}) {
     throwIfAborted(signal);
     const authStorageOptions = options.authStorageOptions ?? {};
     const releaseRevocation = beginOAuthRevocation(serverName, authStorageOptions);
+    logoutCodingLaunch(serverName, authStorageOptions);
     try {
         detachPendingAuthsForServer(serverName, new Error("Authorization cancelled by logout"));
         const storedOAuthState = getOAuthState(serverName, authStorageOptions);

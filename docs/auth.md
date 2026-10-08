@@ -143,6 +143,66 @@ authorization-code servers; use `/mcp-auth` for interactive short-code pairing.
 Contract tests consume a byte-identical synthetic broker fixture from
 `infra@a391ecb38f73f1997917beb080065587b95156c5:scripts/tests/fixtures/broker-device-flow.json`.
 
+### Shared coding enrollment (broker API v1)
+
+Opt in only for a broker implementing coding enrollment v1:
+
+```json
+{
+  "mcpServers": {
+    "broker": {
+      "url": "https://trebby.lan/broker/mcp",
+      "auth": "oauth",
+      "oauth": { "codingEnrollment": { "version": 1, "cohort": "work" } }
+    }
+  },
+  "settings": { "oauthPersistence": "session" }
+}
+```
+
+`cohort` is a non-secret local secure-store slot, **not** an approval, token or
+broker authorization reference. The first launch uses ordinary PKCE human
+consent: select **coding** and a shared work period in the broker form. The
+adapter privately stores the returned cohort proof in the OS credential store.
+Subsequent independent launches with the same URL/slot enroll silently, each
+receiving distinct access, refresh and enrollment credentials in host-session
+memory. Enrollment proofs survive `/reload` for that host, not process exit.
+Only the cohort proof is persistent; do not paste it into config, prompts or
+logs. For headless hosts, `settings.oauthCredentialStore: "encrypted-file"`
+selects the existing externally keyed encrypted backend for the cohort proof;
+launch tokens remain memory-only. An unavailable secure store is an error.
+
+When the work period elapses, requests report the same non-secret human renewal
+URL. Open it once, approve with the broker's fresh TOTP, then manually continue
+each paused session (or reconnect / run `/mcp-auth broker`). Status checks and
+credential replacement are silent, including idle/absolute-expired old bearers.
+This option does not automatically replay tool calls or renew human authority.
+Extra capability grants are not transferred to replacement sessions. Logout,
+revocation and cancellation prevent late installation; a revoked launch does
+not fall back to cohort enrollment. Start fresh human consent in a new launch
+for terminal revocation. Local logout leaves the cohort proof for other launches.
+
+The contract is `POST JSON` to `/broker/coding/enroll` (`cohort_credential`),
+`/broker/coding/status` (`enrollment_token`) and `/broker/coding/replace`
+(`enrollment_token`, `refresh_token`). Each rotation is serialized per launch;
+proofs are never in URLs, and credential-bearing redirects are rejected.
+Status is checked before using coding credentials. The host retains the selected
+URL/slot identity alongside session-only launch state, so async valid-token reads
+(including the public OAuth helper with omitted configuration) keep this gate.
+It is not ambient config discovery and does not opt other names or launches in.
+URL/slot rebinding fences obsolete providers; removing coding config from a read
+does not reinterpret existing coding credentials as ordinary OAuth credentials.
+Local snapshot inspection is not a server-validity check. Explicit service
+headers are still required where the endpoint needs them. Lost rotation responses are
+not blindly retried or recovered with an old bearer: a consumed proof requires
+fresh human consent. API v1, strict issuer validation, `/broker/mcp`, session
+persistence and authorization-code consent are required. Missing/unsupported
+versions provide upgrade or ordinary-OAuth fallback guidance without granting
+approval. Nonbroker OAuth and default device/isolated launches are unchanged.
+The endpoint field/status fixture is copied byte-for-byte from
+`infra@a665b5629c1375f296db7d1be115b1b5dbc24255:scripts/tests/fixtures/coding-enrollment-v1.json`.
+See [controlled integration smoke](coding-enrollment-smoke.md) for revisions and commands.
+
 ### Non-Interactive `client_credentials`
 
 For machine-to-machine OAuth, configure `grantType: "client_credentials"`.
@@ -315,7 +375,7 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 Persistent OAuth entries are stored per configured server name in the operating system credential store, using macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret through `@napi-rs/keyring`. The stored entry contains tokens, dynamic client information, legacy verifier/state fields when present, and the server URL binding.
 
-With `settings.oauthPersistence: "session"`, the Pi session manager owns an in-memory credential namespace that survives extension `/reload` and conversation changes using that same manager. Tokens and dynamic client registration are retained; transports, callbacks, and pending authorization flows are still cancelled and rebuilt. Separate SDK session managers (including concurrent Pi processes) cannot read or overwrite one another's credentials, even for the same server name and URL. Server-name and URL binding remain enforced. Hosts without a session manager retain isolated adapter-local storage. Logout clears the server's credentials, and process exit discards all memory. This mode never reads, migrates, removes, or writes persistent or legacy credentials. Session mode takes precedence over `settings.oauthCredentialStore`; encrypted-file storage applies only to persistent credentials.
+With `settings.oauthPersistence: "session"`, the Pi session manager owns an in-memory credential namespace that survives extension `/reload` and conversation changes using that same manager. Tokens and dynamic client registration are retained; transports, callbacks, and pending authorization flows are still cancelled and rebuilt. Separate SDK session managers (including concurrent Pi processes) cannot read or overwrite one another's credentials, even for the same server name and URL. Server-name and URL binding remain enforced. Hosts without a session manager retain isolated adapter-local storage. Logout clears the server's credentials, and process exit discards all memory. Ordinary session OAuth never reads, migrates, removes, or writes persistent or legacy credentials. Explicit shared coding enrollment persists only its cohort proof, as described above. Session mode keeps access/refresh credentials in memory regardless of `settings.oauthCredentialStore`.
 
 A broker launcher identity may already be bound to an OAuth session. If its credentials are genuinely lost or revoked, exit Pi and start a fresh launcher invocation with a new identity before pairing again; repeated authentication under the old identity is not a recovery mechanism.
 
@@ -393,7 +453,7 @@ When an MCP server does not publish usable protected-resource metadata, configur
 
 ### Credential Stores
 
-Persistent OAuth credentials are written to the OS credential store by default, or only to the encrypted file store when explicitly selected. Legacy plaintext files are read only for one-way migration to the default OS store and are removed after successful import. On Linux, revoked session-keyring errors can be retried once through a fresh `keyctl session` helper during explicit re-authentication. Session-scoped OAuth remains in process memory and does not inspect either storage location.
+Persistent OAuth credentials are written to the OS credential store by default, or only to the encrypted file store when explicitly selected. Legacy plaintext files are read only for one-way migration to the default OS store and are removed after successful import. On Linux, revoked session-keyring errors can be retried once through a fresh `keyctl session` helper during explicit re-authentication. Ordinary session-scoped OAuth remains in process memory and does not inspect either storage location; opt-in shared coding reads/writes only its separate cohort-proof entry.
 
 Credential entries reside in process memory for the lifetime of the Pi process rather than being re-read per request, and the process-memory copy is discarded on exit.
 

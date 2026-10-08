@@ -165,6 +165,7 @@
     "mcp-callback-server.ts",
     "mcp-auth-flow.ts",
     "mcp-device-auth.ts",
+    "mcp-coding-auth.ts",
     "mcp-auth-fetch.ts",
     "mcp-panel.ts",
     "mcp-panel-theme.ts",
