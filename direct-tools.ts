@@ -359,6 +359,7 @@ export function createDirectToolExecutor(
           ...outputGuardOptions,
           prefix: "Error: ",
           emptyTextFallback: "Tool execution failed",
+          artifactMcpResult: result,
           ...(state.config.settings?.directToolResultDetails === "bounded" ? { rawMcpResult: result } : {}),
         });
         return {
@@ -375,6 +376,7 @@ export function createDirectToolExecutor(
         const guarded = await guardMcpOutput(outputContent, {
           ...outputGuardOptions,
           suffix: `\n\n${uiSummary.message}`,
+          artifactMcpResult: result,
           ...(state.config.settings?.directToolResultDetails === "bounded" ? { rawMcpResult: result } : {}),
         });
         return {
@@ -394,6 +396,7 @@ export function createDirectToolExecutor(
       const guarded = await guardMcpOutput(outputContent, {
         ...outputGuardOptions,
         ...scriptPipeHint(state.scriptTool, outputContent),
+        artifactMcpResult: result,
         ...(state.config.settings?.directToolResultDetails === "bounded" ? { rawMcpResult: result } : {}),
       });
       return {
