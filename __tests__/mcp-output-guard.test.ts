@@ -1,10 +1,20 @@
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { resolveMcpResultContent } from "../tool-registrar.ts";
 import { guardMcpOutput, resolveMcpOutputGuardOptions, type McpResultSummary } from "../mcp-output-guard.ts";
+
+const recoveryToolsAvailable = ["bash", "jq"].every((tool) => spawnSync(tool, ["--version"]).status === 0);
+const commentsPayload = {
+  comments: Array.from({ length: 31 }, (_, id) => ({ id, content: "x".repeat(2000) })),
+  comments_revision: "revision-fence",
+};
+const commentsResult = {
+  content: [{ type: "text", text: JSON.stringify(commentsPayload) }],
+  structuredContent: { result: JSON.stringify(commentsPayload) },
+};
 
 describe("guardMcpOutput", () => {
   it("leaves small MCP output unchanged and keeps the raw result in details", async () => {
@@ -89,14 +99,8 @@ describe("guardMcpOutput", () => {
   });
 
   it("recovers oversized JSON comments with duplicated structured content from the advertised artifact", async () => {
-    const payload = {
-      comments: Array.from({ length: 31 }, (_, id) => ({ id, content: "x".repeat(2000) })),
-      comments_revision: "revision-fence",
-    };
-    const rawMcpResult = {
-      content: [{ type: "text", text: JSON.stringify(payload) }],
-      structuredContent: { result: JSON.stringify(payload) },
-    };
+    const payload = commentsPayload;
+    const rawMcpResult = commentsResult;
     const guarded = await guardMcpOutput(resolveMcpResultContent(rawMcpResult), { rawMcpResult });
     const path = guarded.outputGuard!.fullOutputPath!;
     const text = (guarded.content[0] as { text: string }).text;
@@ -110,6 +114,15 @@ describe("guardMcpOutput", () => {
     expect(text).not.toContain("structuredContent:\n");
     expect(text).toContain("Truncation is display-only");
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
+    expect(JSON.parse(saved.content[0].text).comments.slice(-3)).toEqual(payload.comments.slice(-3));
+    expect(text).toContain("Inspect keys: jq -c 'keys'");
+  });
+
+  it.skipIf(!recoveryToolsAvailable)("executes the advertised recovery command when bash and jq are installed", async () => {
+    const payload = commentsPayload;
+    const guarded = await guardMcpOutput(resolveMcpResultContent(commentsResult), { rawMcpResult: commentsResult });
+    const path = guarded.outputGuard!.fullOutputPath!;
+    const text = (guarded.content[0] as { text: string }).text;
     // Execute exactly the bounded inspection command advertised to the model.
     const command = text.match(/Inspect keys: (.*?); select fields/)![1];
     expect(JSON.parse(execFileSync("bash", ["-c", command], { encoding: "utf8" }))).toEqual(["content", "structuredContent"]);
