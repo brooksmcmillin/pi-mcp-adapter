@@ -43,6 +43,7 @@ export interface McpOutputGuardDetails {
   /** Number of image content blocks returned untouched alongside the truncated text. */
   imageBlocksPassedThrough?: number;
   fullOutputPath?: string;
+  fullOutputFormat?: "json" | "text";
   writeError?: string;
 }
 
@@ -77,6 +78,8 @@ export interface McpOutputGuardOptions {
    * whose details never carried the raw result (e.g. direct tools).
    */
   rawMcpResult?: unknown;
+  /** Original tool result for truncation artifacts only; does not add result details. */
+  artifactMcpResult?: unknown;
 }
 
 export interface GuardedMcpOutput {
@@ -158,8 +161,9 @@ export async function guardMcpOutput(
   let outputGuard: McpOutputGuardDetails | undefined;
 
   if (truncation.truncated) {
-    const { path: fullOutputPath, error: writeError } = await saveArtifact("output", composedOutput);
-    const initialNotice = formatTruncationNotice(truncation, fullOutputPath, writeError);
+    const artifact = serializeOutputArtifact(options.artifactMcpResult ?? options.rawMcpResult, composedOutput);
+    const { path: fullOutputPath, error: writeError } = await saveArtifact("output", artifact.text, artifact.format === "json" ? "json" : "txt");
+    const initialNotice = formatTruncationNotice(truncation, fullOutputPath, writeError, artifact.format);
     // Footers are optional guidance: drop one that would not fit beside the notice rather than exceed the limits.
     const noticeWithFooter = textStats(`\n\n${initialNotice}${footer}`);
     const keptFooter = noticeWithFooter.bytes < maxBytes && noticeWithFooter.lines < maxLines ? footer : "";
@@ -172,6 +176,7 @@ export async function guardMcpOutput(
       { ...truncation, outputLines: preview.outputLines, outputBytes: preview.outputBytes },
       fullOutputPath,
       writeError,
+      artifact.format,
     );
     const finalText = `${preview.content}\n\n${notice}${keptFooter}`;
     const finalStats = textStats(finalText);
@@ -193,7 +198,7 @@ export async function guardMcpOutput(
       maxLines: truncation.maxLines,
       maxBytes: truncation.maxBytes,
       ...(imageBlocks.length > 0 ? { imageBlocksPassedThrough: imageBlocks.length } : {}),
-      ...(fullOutputPath !== undefined ? { fullOutputPath } : {}),
+      ...(fullOutputPath !== undefined ? { fullOutputPath, fullOutputFormat: artifact.format } : {}),
       ...(writeError !== undefined ? { writeError } : {}),
     };
   }
@@ -278,10 +283,23 @@ function truncateStringToBytes(value: string, maxBytes: number): string {
   return buffer.subarray(0, end).toString("utf8");
 }
 
+function serializeOutputArtifact(result: unknown, displayText: string): { text: string; format: "json" | "text" } {
+  if (result !== undefined) {
+    try {
+      const json = JSON.stringify(result, null, 2);
+      if (json !== undefined) return { text: json, format: "json" };
+    } catch {
+      // Non-protocol values may not serialize; preserve the complete display text instead.
+    }
+  }
+  return { text: displayText, format: "text" };
+}
+
 function formatTruncationNotice(
   truncation: TruncationResult,
   fullOutputPath: string | undefined,
   writeError: string | undefined,
+  format: "json" | "text",
 ): string {
   let reason: string;
   if (truncation.firstLineExceedsLimit) {
@@ -293,7 +311,11 @@ function formatTruncationNotice(
   }
   const base = `[MCP text output truncated: original ${truncation.totalLines.toLocaleString()} lines / ${formatSize(truncation.totalBytes)}. ${reason}.`;
   if (fullOutputPath) {
-    return `${base} Full text saved to: ${fullOutputPath} — use read with offset/limit or grep to inspect.]`;
+    const quotedPath = `'${fullOutputPath.replaceAll("'", "'\\''")}'`;
+    if (format === "json") {
+      return `${base} Full MCP result saved as JSON to: ${fullOutputPath} (content and structuredContent are separate). Inspect keys: jq -c 'keys' ${quotedPath}; select fields/slices before printing. JSON text blocks require fromjson. Truncation is display-only; the complete result is in the file.]`;
+    }
+    return `${base} Full text saved to: ${fullOutputPath} (plain text, not a JSON document) — use read with offset/limit; for oversized lines use bounded byte slices via bash.]`;
   }
   return `${base} Full output could not be saved: ${writeError ?? "unknown error"}]`;
 }
@@ -475,10 +497,10 @@ function serializedObjectEntryBytes(key: string, value: unknown, hasPrevious: bo
   return Math.max(0, byteLength(serialized) - byteLength("{}")) + (hasPrevious ? 1 : 0);
 }
 
-async function saveArtifact(kind: string, text: string): Promise<{ path?: string; error?: string }> {
+async function saveArtifact(kind: string, text: string, extension = "txt"): Promise<{ path?: string; error?: string }> {
   try {
     const dir = await mkdtemp(join(tmpdir(), "pi-mcp-output-"));
-    const path = join(dir, `${kind}-${randomBytes(4).toString("hex")}.txt`);
+    const path = join(dir, `${kind}-${randomBytes(4).toString("hex")}.${extension}`);
     await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
     return { path };
   } catch (error) {

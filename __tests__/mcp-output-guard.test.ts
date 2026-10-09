@@ -1,7 +1,9 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { resolveMcpResultContent } from "../tool-registrar.ts";
 import { guardMcpOutput, resolveMcpOutputGuardOptions, type McpResultSummary } from "../mcp-output-guard.ts";
 
 describe("guardMcpOutput", () => {
@@ -72,17 +74,70 @@ describe("guardMcpOutput", () => {
     expect(guarded.content[0]).toMatchObject({ type: "text" });
     const returnedText = guarded.content[0].type === "text" ? guarded.content[0].text : "";
     expect(returnedText).toContain("MCP text output truncated");
-    expect(returnedText).toContain("Full text saved to:");
+    expect(returnedText).toContain("Full MCP result saved as JSON to:");
     expect(returnedText).not.toContain("line-19");
 
     const saved = await readFile(guarded.outputGuard!.fullOutputPath!, "utf8");
-    expect(saved).toBe(text);
+    expect(JSON.parse(saved)).toEqual({ content: [{ type: "text", text }], isError: false, structuredContent: { rows: [text] } });
+    expect(guarded.outputGuard?.fullOutputFormat).toBe("json");
 
     const summary = guarded.mcpResult as McpResultSummary;
     expect(summary).toMatchObject({ omitted: true, isError: false, contentBlocks: 1 });
     expect(summary.fullResultPath).toBeTruthy();
     expect(summary.structuredContent).toMatchObject({ summary: { omitted: true } });
     expect(JSON.stringify(summary)).not.toContain("line-19");
+  });
+
+  it("recovers oversized JSON comments with duplicated structured content from the advertised artifact", async () => {
+    const payload = {
+      comments: Array.from({ length: 31 }, (_, id) => ({ id, content: "x".repeat(2000) })),
+      comments_revision: "revision-fence",
+    };
+    const rawMcpResult = {
+      content: [{ type: "text", text: JSON.stringify(payload) }],
+      structuredContent: { result: JSON.stringify(payload) },
+    };
+    const guarded = await guardMcpOutput(resolveMcpResultContent(rawMcpResult), { rawMcpResult });
+    const path = guarded.outputGuard!.fullOutputPath!;
+    const text = (guarded.content[0] as { text: string }).text;
+    expect(guarded.outputGuard).toMatchObject({ firstLineExceedsLimit: true, fullOutputFormat: "json" });
+    expect(path).toMatch(/\.json$/);
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    expect(saved).toEqual(rawMcpResult);
+    expect(JSON.parse(saved.content[0].text)).toEqual(payload);
+    expect(JSON.parse(saved.structuredContent.result)).toEqual(payload);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect(text).not.toContain("structuredContent:\n");
+    expect(text).toContain("Truncation is display-only");
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
+    // Execute exactly the bounded inspection command advertised to the model.
+    const command = text.match(/Inspect keys: (.*?); select fields/)![1];
+    expect(JSON.parse(execFileSync("bash", ["-c", command], { encoding: "utf8" }))).toEqual(["content", "structuredContent"]);
+    const selected = JSON.parse(execFileSync("jq", [
+      ".content[0].text | fromjson | {comments_revision, comments: .comments[-3:]}", path,
+    ], { encoding: "utf8" }));
+    expect(selected).toEqual({ comments_revision: payload.comments_revision, comments: payload.comments.slice(-3) });
+  });
+
+  it("uses JSON artifacts without adding raw result details for lean tool calls", async () => {
+    const result = { content: [{ type: "text", text: "x".repeat(60_000) }], structuredContent: { ok: true } };
+    const guarded = await guardMcpOutput(resolveMcpResultContent(result), { artifactMcpResult: result });
+    expect(guarded.mcpResult).toBeUndefined();
+    expect(guarded.outputGuard?.fullOutputFormat).toBe("json");
+    expect(JSON.parse(await readFile(guarded.outputGuard!.fullOutputPath!, "utf8"))).toEqual(result);
+  });
+
+  it("labels plain text artifacts honestly when no serializable tool result is available", async () => {
+    const result: Record<string, unknown> = {};
+    result.circular = result;
+    for (const options of [{}, { artifactMcpResult: result }]) {
+      const text = "x".repeat(60_000);
+      const guarded = await guardMcpOutput([{ type: "text", text }], options);
+      expect(guarded.outputGuard?.fullOutputFormat).toBe("text");
+      expect(guarded.outputGuard?.fullOutputPath).toMatch(/\.txt$/);
+      expect((guarded.content[0] as { text: string }).text).toContain("plain text, not a JSON document");
+      expect(await readFile(guarded.outputGuard!.fullOutputPath!, "utf8")).toBe(text);
+    }
   });
 
   it("summarizes details.mcpResult only when it exceeds detailsMaxBytes", async () => {

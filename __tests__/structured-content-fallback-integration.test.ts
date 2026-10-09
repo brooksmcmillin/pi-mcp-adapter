@@ -1,6 +1,32 @@
+import { readFile } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // End-to-end coverage for the structuredContent fallback.
+
+describe("oversized tool-result artifacts", () => {
+  it.each([false, true])("preserves raw data across proxy and lean direct calls (isError=%s)", async (isError) => {
+    const { executeCall } = await import("../proxy-modes.ts");
+    const { createDirectToolExecutor } = await import("../direct-tools.ts");
+    const payload = { comments: [{ content: "x".repeat(60_000) }], comments_revision: "fence" };
+    const rawResult = { isError, content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: { result: JSON.stringify(payload) } };
+    const state = makeState(rawResult);
+    mocks.lazyConnect.mockResolvedValue(true);
+    mocks.getFailureAgeSeconds.mockReturnValue(null);
+    const executor = createDirectToolExecutor(
+      () => state, () => null,
+      { serverName: "demo", originalName: "tool", prefixedName: "demo_tool", description: "Tool" },
+    );
+    const direct = await executor("id", {}, undefined as any, () => {}, undefined as any);
+    const proxy = await executeCall(state, "demo_tool", {}, "demo");
+    for (const result of [direct, proxy]) {
+      const details = result.details as any;
+      expect(details.outputGuard.fullOutputFormat).toBe("json");
+      expect(JSON.parse(await readFile(details.outputGuard.fullOutputPath, "utf8"))).toEqual(rawResult);
+      expect(textOf(result)).toContain("Full MCP result saved as JSON");
+    }
+    expect(direct.details).not.toHaveProperty("mcpResult");
+  });
+});
 
 const mocks = vi.hoisted(() => ({
   lazyConnect: vi.fn(),
