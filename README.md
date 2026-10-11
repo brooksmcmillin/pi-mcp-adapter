@@ -67,7 +67,7 @@ When you install or update the adapter, it turns Pi's built-in MCP off in Pi's s
 pi install npm:pi-mcp-adapter
 ```
 
-Restart Pi after installation.
+Restart Pi after installation. A source merge does not update installed adapters or already-running sessions. To try a checked-out revision, install its absolute local path with `pi install /absolute/path/to/pi-mcp-adapter` (including its dependencies), then restart Pi or run `/reload` to load the updated extension. For managed npm/git installs, update the configured package source first; pinned versions/refs must be changed explicitly.
 
 > **DeepSeek Harness (third-party bridge):** Run the unmodified adapter in DSH via [pi2dsh](https://github.com/weijiafu14/pi2dsh); see the [verified dsh-TUI and Web MCP guide](https://github.com/weijiafu14/pi2dsh/tree/main/examples/tui-mcp).
 

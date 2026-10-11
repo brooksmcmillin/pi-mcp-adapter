@@ -42,7 +42,12 @@ describe("proxy discovery", () => {
   it("searches MCP tools only", () => {
     const result = executeSearch(createState(), "read");
 
-    expect(result.content[0].text).toBe('No tools matching "read"');
+    expect(result.content[0].text).toContain('No tools matching "read"');
+    expect(result.content[0].text).toContain("only the adapter's MCP registry, not host/extension capabilities");
+    expect(result.content[0].text).toContain("does not establish host capability unavailability");
+    expect(result.content[0].text).toContain('search_capabilities({ query: "nexus_list_dependencies", limit: 1 })');
+    expect(result.content[0].text).toContain("If search_capabilities is available");
+    expect(result.content[0].text).toContain("not proof of availability or permission; never bypass an authorization refusal");
     expect(result.details).toMatchObject({ count: 0, matches: [] });
   });
 
@@ -53,7 +58,7 @@ describe("proxy discovery", () => {
 
     const result = executeSearch(state, "read", false, "demo");
 
-    expect(result.content[0].text).toBe(
+    expect(result.content[0].text).toContain(
       'No tools matching "read" in "demo" Server "demo" is still connecting; retry in a moment.',
     );
     expect(result.details).toMatchObject({ count: 0, matches: [], connectingServers: ["demo"] });
@@ -70,10 +75,52 @@ describe("proxy discovery", () => {
 
     const result = executeSearch(state, "read");
 
-    expect(result.content[0].text).toBe(
+    expect(result.content[0].text).toContain(
       'No tools matching "read" Servers "alpha", "zeta" are still connecting; retry in a moment.',
     );
     expect(result.details).toMatchObject({ count: 0, matches: [], connectingServers: ["alpha", "zeta"] });
+  });
+
+  it("keeps an actually absent tool absent without executing discovery or calls", () => {
+    const state = createState();
+    const connect = vi.fn();
+    const callTool = vi.fn();
+    Object.assign(state.manager, { connect, callTool });
+    const result = executeSearch(state, "absent_tool");
+
+    expect(result.details).toMatchObject({ count: 0, matches: [], hasMore: false, nextOffset: null });
+    expect(result.content[0].text).toContain('No tools matching "absent_tool"');
+    expect(result.content[0].text).not.toContain("Found 1 tool");
+    expect(connect).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("replays sanitized task-7409 discovery with host capability present=%s", present => {
+    const state = createState();
+    state.config.mcpServers = { taskmanager: { command: "fixture-only" } };
+    state.toolMetadata = new Map([["taskmanager", []]]);
+    const hostRegistry = new Set(present ? ["nexus_get_task", "nexus_list_dependencies"] : ["nexus_get_task"]);
+    const searchCapabilities = vi.fn(({ query }: { query: string; limit: number }) =>
+      hostRegistry.has(query) ? [query] : []);
+    const replay = [];
+
+    // Queries only, extracted from the historical session; no task bodies or credentials.
+    for (const query of ["get_task", "task details", "list dependencies", "claim task"]) {
+      const result = executeSearch(state, query, false, "taskmanager");
+      expect(result.details).toMatchObject({ count: 0, matches: [] });
+      expect(searchCapabilities).not.toHaveBeenCalled();
+      replay.push({ tool: "mcp", query, server: "taskmanager", matches: [] });
+    }
+    const guidance = executeSearch(state, "list dependencies", false, "taskmanager").content[0].text!;
+    const example = guidance.match(/search_capabilities\(\{ query: "([^"]+)", limit: (\d+) \}\)/);
+    expect(example).not.toBeNull();
+    const input = { query: example![1]!, limit: Number(example![2]) };
+    expect(input).toEqual({ query: "nexus_list_dependencies", limit: 1 });
+    const matches = searchCapabilities(input);
+    expect(matches).toEqual(present ? ["nexus_list_dependencies"] : []);
+    expect(state.toolMetadata.get("taskmanager")).toEqual([]);
+    replay.push({ tool: "search_capabilities", ...input, matches });
+    console.info(JSON.stringify({ fixture: "task-7409-discovery", present, replay }));
   });
 
   it("rejects regex queries longer than the safety cap", () => {
@@ -109,6 +156,8 @@ describe("proxy discovery", () => {
   it("returns ranked paged search details", () => {
     const result = executeSearch(createState(), "demo", false, undefined, false, 1, 0);
 
+    expect(result.content[0].text).toContain('Found 2 tools matching "demo"');
+    expect(result.content[0].text).not.toContain("search_capabilities");
     expect(result.details).toMatchObject({
       count: 2,
       hasMore: true,

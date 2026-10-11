@@ -123,6 +123,7 @@ describe("semantic search", () => {
     const blockedServer = await executeSearch(state, "anything", false, "other", false, 12, 0, "semantic", undefined, evaluator);
     expect(blockedServer.details).toMatchObject({ error: "data_policy_denied" });
     expect(blockedServer.content[0].text).toContain('Server "other" is not allowed');
+    expect(blockedServer.content[0].text).not.toContain("search_capabilities");
     expect(evaluator).not.toHaveBeenCalled();
   });
 
@@ -173,7 +174,9 @@ describe("semantic search", () => {
     const none = await semanticSearch(state, "query", undefined, undefined, choiceEvaluator("none"));
     expect(none).toMatchObject({ ok: true, matches: [], backend: { abstained: true } });
     const renderedNone = await gatewaySemantic(state, "query", choiceEvaluator("none"));
-    expect(renderedNone.content[0].text).toBe('Jev found no suitable tool for "query"');
+    expect(renderedNone.content[0].text).toContain('Jev found no suitable tool for "query"');
+    expect(renderedNone.content[0].text).toContain("does not establish host capability unavailability");
+    expect(renderedNone.details.backend).toMatchObject({ abstained: true });
     const inconsistentNone = await semanticSearch(state, "query", undefined, undefined, choiceEvaluator("none", { c0: 0.9, none: 0.1 }));
     expect(inconsistentNone).toMatchObject({ ok: true, matches: [], backend: { abstained: true } });
     state.config.settings!.jev = { semanticSearch: true, allowedServers: ["demo", "other"], semanticMinProbability: 0.9 };

@@ -25,6 +25,8 @@ MCP proxy and direct-tool results use compact self-rendered rows by default. Col
 
 Search covers MCP tools only. Space-separated words are ranked by weighted matches across name, server, description, the server's configured `description`, and any configured `searchKeywords`, then returned one page at a time (`limit` defaults to 12). Use `details.nextOffset` for the next page. Regex search is still available with `regex: true`, but regex results are paginated without ranking.
 
+An empty search is scoped to the adapter's MCP registry; it does not establish that a host/extension capability is unavailable. If the host provides `search_capabilities`, use an exact operation name there, for example `search_capabilities({ query: "nexus_list_dependencies", limit: 1 })` for TaskManager broker discovery. This guidance neither checks that registry nor grants permission, and is not a workaround for an authorization refusal.
+
 Tool names are fuzzy-matched on hyphens and underscores — `context7_resolve_library_id` finds `context7_resolve-library-id`. When `describe` or `tool` cannot resolve a name, the result includes top suggestions so the agent can correct a typo or missing prefix in the same turn.
 
 When a server declares MCP tool annotations, `describe` adds a `Hints:` line such as `Hints: read-only, idempotent`, `tools.describe` in `mcpScript` returns them as `annotations`, and the approval prompt says when a tool is marked destructive or read-only. They are the server's own hints, not guarantees, and never appear in search results or direct-tool descriptions.
