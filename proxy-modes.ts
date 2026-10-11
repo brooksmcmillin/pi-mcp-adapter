@@ -900,7 +900,7 @@ function renderSearchResults(
         ? ` Servers ${connectingServers.map(name => `"${name}"`).join(", ")} are still connecting; retry in a moment.`
         : "";
     return {
-      content: [{ type: "text" as const, text: `${msg}${connectingMessage}` }],
+      content: [{ type: "text" as const, text: `${msg}${connectingMessage}\n\nSearch covers only the adapter's MCP registry, not host/extension capabilities. A no-match here does not establish host capability unavailability. If search_capabilities is available, search the exact operation there (e.g. search_capabilities({ query: "nexus_list_dependencies", limit: 1 }) for TaskManager broker discovery). This is advisory, not proof of availability or permission; never bypass an authorization refusal.` }],
       details: {
         mode: "search", matches: [], count: 0, hasMore: false, nextOffset: null, query,
         ...(backend ? { backend } : {}),
