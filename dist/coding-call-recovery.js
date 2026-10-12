@@ -20,6 +20,16 @@ export class CodingAuthorizationPaused extends Error {
         this.renewalUrl = renewalUrl;
     }
 }
+/** A credential request was rejected; this alone never authorizes replaying a tool. */
+export class CodingCredentialPaused extends Error {
+    reference;
+    renewalUrl;
+    constructor(reference, renewalUrl) {
+        super(`Coding authorization paused. Open ${renewalUrl} for human renewal, then continue.`);
+        this.reference = reference;
+        this.renewalUrl = renewalUrl;
+    }
+}
 export function rejectedCodingReference(error) {
     if (!(error instanceof ProtocolError) || error.code !== -32003)
         return undefined;
@@ -49,9 +59,12 @@ export const CODING_WAIT_MAX_CHECKS = 40;
 /** Holds only this invocation's closure; no model turn, persisted bearer or background replay. */
 export async function waitForCodingRenewal(pause, recover, options) {
     const deadline = AbortSignal.timeout(CODING_WAIT_BUDGET_MS);
-    const signal = combineAbortSignals(options.signal, deadline);
-    options.notify?.(`Waiting up to 5 minutes for coding renewal: ${pause.renewalUrl}. Cancel to discard this pending call.`);
+    const interaction = new AbortController();
+    const signal = combineAbortSignals(options.signal, deadline, interaction.signal);
     try {
+        options.notify?.(`Waiting up to 5 minutes for coding renewal: ${pause.renewalUrl}. Cancel to discard this pending call.`);
+        if (options.onWait)
+            await abortable(Promise.resolve(options.onWait(pause, signal, () => interaction.abort(new Error("Coding renewal cancelled; reconnect when ready.")))), signal);
         for (let attempt = 0; attempt < CODING_WAIT_MAX_CHECKS; attempt++) {
             options.check();
             signal.throwIfAborted();
@@ -64,7 +77,7 @@ export async function waitForCodingRenewal(pause, recover, options) {
             catch (error) {
                 options.check();
                 signal.throwIfAborted();
-                if (!(error instanceof CodingAuthorizationPaused) || error.reference !== pause.reference)
+                if (!(error instanceof CodingAuthorizationPaused || error instanceof CodingCredentialPaused) || error.reference !== pause.reference)
                     throw error;
             }
             const delay = Math.min(10_000, 1000 * 1.6 ** attempt) * (0.8 + Math.random() * 0.4);
@@ -76,6 +89,9 @@ export async function waitForCodingRenewal(pause, recover, options) {
         if (!deadline.aborted)
             throw error;
     }
-    throw new Error(`Coding renewal wait ended; this call was not executed. Open ${pause.renewalUrl}, then manually continue to retry the original tool and arguments in this conversation. No background retry remains.`);
+    finally {
+        interaction.abort();
+    }
+    throw new Error(`Coding renewal wait ended. Open ${pause.renewalUrl}, then manually continue to retry the original tool and arguments, or reconnect the MCP server. No background retry remains.`);
 }
 //# sourceMappingURL=coding-call-recovery.js.map

@@ -27,7 +27,7 @@ import { resourceNameToToolName } from "./resource-tools.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
 import { formatMcpFooterStatus, formatMcpStatus, openUrl, parallelLimit, providerSignInMessage, sanitizeTerminalText } from "./utils.ts";
 import { logger } from "./logger.ts";
-import { throwIfAborted } from "./abort.ts";
+import { abortable, throwIfAborted } from "./abort.ts";
 import { getAuthStorageOptions } from "./mcp-auth.ts";
 import { createOAuthRuntime, hasPendingAuth, shutdownOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import {
@@ -168,6 +168,31 @@ export async function initializeMcp(
   manager.setDefaultRequestTimeoutMs(config.settings?.requestTimeoutMs);
   manager.setTraceConfig?.(config.settings?.trace);
   manager.setAuthStorageOptions(authStorageOptions);
+  if (ui && hasUI && mode === "tui") {
+    let renewalPrompt: Promise<void> = Promise.resolve();
+    manager.setCodingRenewalPrompt(async (serverName, pause, signal, cancel) => {
+      // Reserve the dialog slot before yielding: eager connects can pause together.
+      const previous = renewalPrompt;
+      let release!: () => void;
+      const finished = new Promise<void>(resolve => { release = resolve; });
+      renewalPrompt = previous.then(() => finished);
+      try {
+        await abortable(previous, signal);
+        owner.throwIfInactive();
+        signal.throwIfAborted();
+        void ui.input(
+          `Renew ${sanitizeTerminalText(serverName)} coding authorization\n\n` +
+            `Open:\n${sanitizeTerminalText(pause.renewalUrl)}\n\n` +
+            "Approve a new work period in your browser.\nWaiting up to 5 minutes; connection resumes automatically.\nEscape cancels. No callback URL needed.",
+          undefined,
+          { signal },
+        ).then(() => { if (!signal.aborted) cancel(); }, () => { if (!signal.aborted) cancel(); }).finally(release);
+      } catch (error) {
+        release();
+        throw error;
+      }
+    });
+  }
   // Pi before 0.99.2 has no getApiKeyForProvider; auth.provider servers then fail to connect with a notice.
   if (typeof modelRegistry?.getApiKeyForProvider === "function") {
     manager.setProviderToken(provider => modelRegistry.getApiKeyForProvider(provider));

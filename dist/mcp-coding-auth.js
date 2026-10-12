@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { abortable } from "./abort.js";
 import { combineAbortSignals } from "./runtime-owner.js";
-import { CodingAuthorizationPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS } from "./coding-call-recovery.js";
+import { CodingAuthorizationPaused, CodingCredentialPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS } from "./coding-call-recovery.js";
 import { getAuthForUrl, getAuthStorageIdentity, invalidateAuthEntryCache, saveAuthEntry, } from "./mcp-auth.js";
 const credentialSchema = z.object({
     version: z.literal(1), token_type: z.literal("Bearer"), scope: z.literal("profile:coding"),
@@ -221,14 +221,14 @@ export class CodingAuthClient {
                 this.state.calls = undefined; });
         }
     }
-    paused(reference) {
+    paused(reference, credentialRequest = false) {
         if (!reference || !/^[A-Za-z0-9_-]{1,128}$/.test(reference))
             return new Error("Coding authorization paused; use the common human renewal page, then continue");
         const route = new URL(`/broker/coding/renew?authorization_ref=${reference}`, this.issuer).toString();
-        return new CodingAuthorizationPaused(reference, route);
+        return credentialRequest ? new CodingCredentialPaused(reference, route) : new CodingAuthorizationPaused(reference, route);
     }
     async recover(fetchFn, check, signal, mode) {
-        let pausedError = new Error(this.paused(this.state.credentials?.authorization_ref).message);
+        let pausedError = this.paused(this.state.credentials?.authorization_ref, true);
         const request = async (route, body) => {
             check();
             const requestSignal = combineAbortSignals(signal, AbortSignal.timeout(30_000));
@@ -267,7 +267,7 @@ export class CodingAuthClient {
             check();
             if (!cohort?.cohortCredential)
                 return null;
-            pausedError = new Error(this.paused(cohort.cohortReference).message);
+            pausedError = this.paused(cohort.cohortReference, true);
             const payload = this.parseCredentials(await request("enroll", { cohort_credential: cohort.cohortCredential }));
             check();
             if (this.state.credentials !== undefined)

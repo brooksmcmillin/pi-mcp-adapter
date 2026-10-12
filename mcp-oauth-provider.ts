@@ -37,7 +37,7 @@ import { createOAuthFetch, type OAuthFetch } from "./mcp-auth-fetch.ts"
 import { resolveCommandSecret } from "./utils.ts"
 import { getAppClientUri, getAppName } from "./agent-dir.ts"
 import { CodingAuthClient, getRetainedCodingConfig, type CodingCredentials, type CodingEnrollmentConfig } from "./mcp-coding-auth.ts"
-import { codingHttpRejection, type CodingWaitOptions } from "./coding-call-recovery.ts"
+import { codingHttpRejection, waitForCodingRenewal, type CodingRenewalPause, type CodingWaitOptions } from "./coding-call-recovery.ts"
 
 /**
  * Client name advertised during Dynamic Client Registration.
@@ -387,6 +387,16 @@ export class McpOAuthProvider implements OAuthClientProvider {
     return this.coding.runPending(call, this.authFetch, { ...options, check: () => {
       this.throwIfInactive(); options.check()
     } })
+  }
+
+  async waitForCodingConnectionRenewal(pause: CodingRenewalPause, options: CodingWaitOptions): Promise<void> {
+    this.adoptCodingSession()
+    if (!this.coding) throw pause
+    const coding = this.coding
+    const check = () => { this.throwIfInactive(); options.check() }
+    await waitForCodingRenewal(pause, async signal => {
+      await coding.tokens(this.authFetch, check, signal)
+    }, { ...options, check })
   }
 
   private get usesClientCredentials(): boolean {

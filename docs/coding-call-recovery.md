@@ -3,8 +3,25 @@
 Opt-in `oauth.codingEnrollment` v1 providers can retain a pending tool invocation
 across one shared human renewal. The adapter holds the original promise and
 arguments in memory, outside repeated model turns. Proxy, namespace and direct
-tool routes use the same recovery boundary; ordinary providers, resources,
-initial connection failures and completed/idle turns are unchanged.
+tool routes use the same recovery boundary; ordinary providers, resources and
+completed/idle turns are unchanged.
+
+## Interactive connection renewal
+
+When a coding connection pauses during startup or reconnect, Pi shows a
+cancellable renewal prompt and holds that connection attempt for up to five
+minutes. Approve the linked renewal in your browser; Pi recovers credentials,
+closes the prompt and retries connection setup once, including tool discovery.
+Concurrent connection prompts are serialized so they do not overlap the editor.
+New launches with only a cohort proof can also wait: rejected enrollment requests
+are checked until human approval allows one successful enrollment. Enrolled
+sessions check status before replacing expired credentials. A credential-endpoint
+pause can resume connection setup, but does not authorize replaying a tool call.
+
+Escape, shutdown/reload, timeout, revoked proofs or ambiguous credential responses
+stop recovery; no background reconnect or rotation replay survives. Noninteractive
+connections report manual guidance without polling. After cancellation or timeout,
+renew and use `/mcp-adapter reconnect <server>` to try again.
 
 ## Safe retry boundary
 
@@ -60,7 +77,8 @@ The enrollment fixture/API remains the prerequisite documented in
 ```bash
 npm ci --ignore-scripts
 npx vitest run __tests__/coding-call-recovery.test.ts \
-  __tests__/mcp-coding-auth.test.ts __tests__/server-manager-http-auth.test.ts
+  __tests__/mcp-coding-auth.test.ts __tests__/server-manager-http-auth.test.ts \
+  __tests__/coding-connection-renewal.test.ts __tests__/init-auto-auth.test.ts
 npm run typecheck
 CODING_BROKER_INFRA=/absolute/path/to/trusted/infra \
   node --import tsx __tests__/coding-call-recovery-smoke.mjs

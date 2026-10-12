@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServerManager } from "../server-manager.ts";
 import { initializeMcp } from "../init.ts";
 import { saveMetadataCache } from "../metadata-cache.ts";
+import { CodingAuthorizationPaused } from "../coding-call-recovery.ts";
 
 const mocks = vi.hoisted(() => ({
   authenticateServer: vi.fn(),
   started: vi.fn(),
+  input: vi.fn(),
   tempDirs: [] as string[],
 }));
 vi.mock("../commands.ts", () => ({ authenticateServer: mocks.authenticateServer }));
@@ -41,7 +43,7 @@ async function boot(autoAuth = true, mode = "tui", hasUI = true, servers = ["bro
   mocks.tempDirs.push(cwd);
   const notify = vi.fn();
   const state = await initializeMcp({ getFlag: vi.fn() } as any, {
-    cwd, hasUI, mode, ui: { notify, setStatus: vi.fn() },
+    cwd, hasUI, mode, ui: { notify, setStatus: vi.fn(), input: mocks.input },
     signal: new AbortController().signal,
   } as any, undefined, {
     onProjectTrustResolved: mocks.started,
@@ -60,6 +62,9 @@ describe("startup autoAuth", () => {
   beforeEach(() => {
     mocks.authenticateServer.mockReset().mockResolvedValue({ ok: true });
     mocks.started.mockReset();
+    mocks.input.mockReset().mockImplementation((_title, _placeholder, { signal }) => new Promise(resolve => {
+      signal.addEventListener("abort", () => resolve(undefined), { once: true });
+    }));
     vi.mocked(saveMetadataCache).mockClear();
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(McpServerManager.prototype, "getConnection").mockReturnValue(needsAuth);
@@ -139,6 +144,60 @@ describe("startup autoAuth", () => {
     finishPairing({ ok: true });
     await pending;
     expect(mocks.started).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a renewal wait only in an interactive TUI, including manual auth configurations", async () => {
+    vi.spyOn(McpServerManager.prototype, "connect").mockResolvedValue(connected);
+    const setter = vi.spyOn(McpServerManager.prototype, "setCodingRenewalPrompt");
+    await boot(false);
+    expect(setter).toHaveBeenCalledTimes(1);
+    for (const [mode, hasUI] of [["rpc", true], ["json", false], ["tui", false]] as const) {
+      await boot(true, mode, hasUI);
+    }
+    expect(setter).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the renewal URL and closes the prompt automatically without cancelling recovery", async () => {
+    vi.spyOn(McpServerManager.prototype, "connect").mockResolvedValue(connected);
+    const setter = vi.spyOn(McpServerManager.prototype, "setCodingRenewalPrompt");
+    await boot();
+    const prompt = setter.mock.calls[0]![0]!;
+    const controller = new AbortController(), cancel = vi.fn();
+    const url = "https://broker.example/broker/coding/renew?authorization_ref=coding_test";
+    await prompt("broker", new CodingAuthorizationPaused("coding_test", url), controller.signal, cancel);
+    expect(mocks.input).toHaveBeenCalledWith(expect.stringContaining(url), undefined, { signal: controller.signal });
+    expect(mocks.input.mock.calls[0]![0]).toContain("connection resumes automatically");
+    controller.abort();
+    await Promise.resolve();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("cancels the renewal wait when the user dismisses the prompt", async () => {
+    vi.spyOn(McpServerManager.prototype, "connect").mockResolvedValue(connected);
+    const setter = vi.spyOn(McpServerManager.prototype, "setCodingRenewalPrompt");
+    await boot();
+    mocks.input.mockResolvedValue(undefined);
+    const cancel = vi.fn();
+    await setter.mock.calls[0]![0]!("broker", new CodingAuthorizationPaused("coding_test", "https://broker.example/renew"), new AbortController().signal, cancel);
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes concurrent renewal prompts without overlapping the editor", async () => {
+    vi.spyOn(McpServerManager.prototype, "connect").mockResolvedValue(connected);
+    const setter = vi.spyOn(McpServerManager.prototype, "setCodingRenewalPrompt");
+    await boot();
+    const prompt = setter.mock.calls[0]![0]!;
+    const first = new AbortController(), second = new AbortController();
+    const pause = new CodingAuthorizationPaused("coding_test", "https://broker.example/renew");
+    const opened = prompt("one", pause, first.signal, vi.fn());
+    const pending = prompt("two", pause, second.signal, vi.fn());
+    await opened;
+    expect(mocks.input).toHaveBeenCalledTimes(1);
+    first.abort();
+    await pending;
+    expect(mocks.input).toHaveBeenCalledTimes(2);
+    second.abort();
   });
 
   it("reports a reconnect failure without aborting initialization", async () => {

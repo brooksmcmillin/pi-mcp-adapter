@@ -44,6 +44,7 @@ import { logger } from "./logger.ts";
 import { RESOURCE_MIME_TYPE } from "./ui-app-bridge-helpers.ts";
 import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
+import { CodingAuthorizationPaused, CodingCredentialPaused, type CodingRenewalPrompt } from "./coding-call-recovery.ts";
 import { explainRegistrationRejection, extractOAuthConfig, supportsOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import {
   captureOAuthAuthority,
@@ -341,6 +342,11 @@ function createProviderTokenFetch(
 export class McpServerManager {
   private connections = new Map<string, ServerConnection>();
   private codingProviders = new WeakMap<Client, McpOAuthProvider>();
+  private codingRenewalPrompt: ((serverName: string, ...args: Parameters<CodingRenewalPrompt>) => ReturnType<CodingRenewalPrompt>) | undefined;
+
+  setCodingRenewalPrompt(prompt: typeof this.codingRenewalPrompt): void {
+    this.codingRenewalPrompt = prompt;
+  }
 
   runPendingCodingCall<T>(name: string, connection: ServerConnection, call: () => Promise<T>,
     options: import("./coding-call-recovery.ts").CodingWaitOptions): Promise<T> {
@@ -1400,6 +1406,7 @@ export class McpServerManager {
   private async enrichHttpConnectionError(definition: ServerDefinition, error: unknown): Promise<Error> {
     // The transport's OAuth provider can register a client during connect, bypassing startAuth.
     if (error instanceof RegistrationRejectedError) return explainRegistrationRejection(error, resolveServerUrl(definition)!);
+    if (error instanceof CodingAuthorizationPaused || error instanceof CodingCredentialPaused) return error;
     const originalMessage = error instanceof Error ? error.message : String(error);
     if (networkFailureCodes(error, ["ECONNREFUSED"]).length > 0 && isLoopbackUrl(resolveServerUrl(definition)!)) {
       const url = new URL(resolveServerUrl(definition)!);
@@ -1817,6 +1824,7 @@ export class McpServerManager {
     // Agent Plugins set httpTransport, and their declared transport is used without fallback.
     let kind: "streamable-http" | "sse" = definition.httpTransport ?? "streamable-http";
     let invalidated = credentialsInvalidated;
+    let renewed = false;
     for (;;) {
       const result = await attempt(kind);
       if (result.status === "connected") {
@@ -1842,6 +1850,18 @@ export class McpServerManager {
         throw result.error;
       }
       if (signal?.aborted) throwIfAborted(signal);
+
+      if (!renewed && this.codingRenewalPrompt && "provider" in authState
+        && (result.error instanceof CodingAuthorizationPaused || result.error instanceof CodingCredentialPaused)) {
+        const prompt = this.codingRenewalPrompt;
+        await authState.provider.waitForCodingConnectionRenewal(result.error, {
+          signal,
+          check: () => { throwIfAborted(signal); oauthAuthority!(); },
+          onWait: (...args) => prompt(serverName, ...args),
+        });
+        renewed = true;
+        continue;
+      }
 
       if (authState.status === "implicit-deferred" && isUnauthorizedHttpError(result.error)) {
         authState = { status: "implicit-challenged", provider: createAuthProvider() };
