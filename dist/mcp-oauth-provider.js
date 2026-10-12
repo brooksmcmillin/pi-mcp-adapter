@@ -11,7 +11,7 @@ import { createOAuthFetch } from "./mcp-auth-fetch.js";
 import { resolveCommandSecret } from "./utils.js";
 import { getAppClientUri, getAppName } from "./agent-dir.js";
 import { CodingAuthClient, getRetainedCodingConfig } from "./mcp-coding-auth.js";
-import { codingHttpRejection } from "./coding-call-recovery.js";
+import { codingHttpRejection, waitForCodingRenewal } from "./coding-call-recovery.js";
 /**
  * Client name advertised during Dynamic Client Registration.
  *
@@ -325,6 +325,16 @@ export class McpOAuthProvider {
                 this.throwIfInactive();
                 options.check();
             } });
+    }
+    async waitForCodingConnectionRenewal(pause, options) {
+        this.adoptCodingSession();
+        if (!this.coding)
+            throw pause;
+        const coding = this.coding;
+        const check = () => { this.throwIfInactive(); options.check(); };
+        await waitForCodingRenewal(pause, async (signal) => {
+            await coding.tokens(this.authFetch, check, signal);
+        }, { ...options, check });
     }
     get usesClientCredentials() {
         return this.config.grantType === "client_credentials";

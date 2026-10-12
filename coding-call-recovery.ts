@@ -19,6 +19,16 @@ export class CodingAuthorizationPaused extends Error {
   }
 }
 
+/** A credential request was rejected; this alone never authorizes replaying a tool. */
+export class CodingCredentialPaused extends Error {
+  constructor(readonly reference: string, readonly renewalUrl: string) {
+    super(`Coding authorization paused. Open ${renewalUrl} for human renewal, then continue.`)
+  }
+}
+
+export type CodingRenewalPause = CodingAuthorizationPaused | CodingCredentialPaused
+export type CodingRenewalPrompt = (pause: CodingRenewalPause, signal: AbortSignal, cancel: () => void) => void | Promise<void>
+
 export function rejectedCodingReference(error: unknown): string | undefined {
   if (!(error instanceof ProtocolError) || error.code !== -32003) return undefined
   const parsed = pauseSchema.safeParse(error.data)
@@ -45,18 +55,22 @@ export interface CodingWaitOptions {
   signal?: AbortSignal | undefined
   check: () => void
   notify?: ((message: string) => void) | undefined
+  onWait?: CodingRenewalPrompt | undefined
 }
 
 /** Holds only this invocation's closure; no model turn, persisted bearer or background replay. */
 export async function waitForCodingRenewal(
-  pause: CodingAuthorizationPaused,
+  pause: CodingRenewalPause,
   recover: (signal: AbortSignal) => Promise<void>,
   options: CodingWaitOptions,
 ): Promise<void> {
   const deadline = AbortSignal.timeout(CODING_WAIT_BUDGET_MS)
-  const signal = combineAbortSignals(options.signal, deadline)!
-  options.notify?.(`Waiting up to 5 minutes for coding renewal: ${pause.renewalUrl}. Cancel to discard this pending call.`)
+  const interaction = new AbortController()
+  const signal = combineAbortSignals(options.signal, deadline, interaction.signal)!
   try {
+    options.notify?.(`Waiting up to 5 minutes for coding renewal: ${pause.renewalUrl}. Cancel to discard this pending call.`)
+    if (options.onWait) await abortable(Promise.resolve(options.onWait(pause, signal,
+      () => interaction.abort(new Error("Coding renewal cancelled; reconnect when ready.")))), signal)
     for (let attempt = 0; attempt < CODING_WAIT_MAX_CHECKS; attempt++) {
       options.check(); signal.throwIfAborted()
       try {
@@ -65,7 +79,7 @@ export async function waitForCodingRenewal(
         return
       } catch (error) {
         options.check(); signal.throwIfAborted()
-        if (!(error instanceof CodingAuthorizationPaused) || error.reference !== pause.reference) throw error
+        if (!(error instanceof CodingAuthorizationPaused || error instanceof CodingCredentialPaused) || error.reference !== pause.reference) throw error
       }
       const delay = Math.min(10_000, 1000 * 1.6 ** attempt) * (0.8 + Math.random() * 0.4)
       await sleep(delay, undefined, { signal })
@@ -73,6 +87,8 @@ export async function waitForCodingRenewal(
   } catch (error) {
     options.signal?.throwIfAborted()
     if (!deadline.aborted) throw error
+  } finally {
+    interaction.abort()
   }
-  throw new Error(`Coding renewal wait ended; this call was not executed. Open ${pause.renewalUrl}, then manually continue to retry the original tool and arguments in this conversation. No background retry remains.`)
+  throw new Error(`Coding renewal wait ended. Open ${pause.renewalUrl}, then manually continue to retry the original tool and arguments, or reconnect the MCP server. No background retry remains.`)
 }

@@ -3,7 +3,7 @@ import type { FetchLike } from "@modelcontextprotocol/client"
 import { z } from "zod"
 import { abortable } from "./abort.ts"
 import { combineAbortSignals } from "./runtime-owner.ts"
-import { CodingAuthorizationPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS, type CodingWaitOptions } from "./coding-call-recovery.ts"
+import { CodingAuthorizationPaused, CodingCredentialPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS, type CodingWaitOptions } from "./coding-call-recovery.ts"
 import {
   getAuthForUrl, getAuthStorageIdentity, invalidateAuthEntryCache, saveAuthEntry,
   type AuthStorageOptions, type OAuthAuthority, type StoredTokens,
@@ -193,14 +193,14 @@ export class CodingAuthClient {
     finally { void tail.then(() => { if (this.state.calls === tail) this.state.calls = undefined }) }
   }
 
-  private paused(reference: string | undefined): Error {
+  private paused(reference: string | undefined, credentialRequest = false): Error {
     if (!reference || !/^[A-Za-z0-9_-]{1,128}$/.test(reference)) return new Error("Coding authorization paused; use the common human renewal page, then continue")
     const route = new URL(`/broker/coding/renew?authorization_ref=${reference}`, this.issuer).toString()
-    return new CodingAuthorizationPaused(reference, route)
+    return credentialRequest ? new CodingCredentialPaused(reference, route) : new CodingAuthorizationPaused(reference, route)
   }
 
   private async recover(fetchFn: FetchLike, check: OAuthAuthority, signal: AbortSignal | undefined, mode: RecoveryMode): Promise<StoredTokens | null> {
-    let pausedError = new Error(this.paused(this.state.credentials?.authorization_ref).message)
+    let pausedError = this.paused(this.state.credentials?.authorization_ref, true)
     const request = async (route: string, body: Record<string, string>): Promise<unknown> => {
       check()
       const requestSignal = combineAbortSignals(signal, AbortSignal.timeout(30_000))!
@@ -234,7 +234,7 @@ export class CodingAuthClient {
       const cohort = getAuthForUrl(this.cohortAccount, this.url, this.persistent)
       check()
       if (!cohort?.cohortCredential) return null
-      pausedError = new Error(this.paused(cohort.cohortReference).message)
+      pausedError = this.paused(cohort.cohortReference, true)
       const payload = this.parseCredentials(await request("enroll", { cohort_credential: cohort.cohortCredential }))
       check()
       if (this.state.credentials !== undefined) throw new Error("Coding credentials changed while enrolling")

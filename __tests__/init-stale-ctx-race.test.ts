@@ -15,6 +15,7 @@ vi.mock("../server-manager.ts", () => ({
   McpServerManager: vi.fn().mockImplementation(function (this: any) {
     this.setDefaultRequestTimeoutMs = vi.fn();
     this.setAuthStorageOptions = vi.fn();
+    this.setCodingRenewalPrompt = vi.fn();
     this.setSamplingConfig = vi.fn();
     this.setElicitationConfig = vi.fn();
     this.getConnection = vi.fn();

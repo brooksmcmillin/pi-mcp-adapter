@@ -172,8 +172,15 @@ logs. For headless hosts, `settings.oauthCredentialStore: "encrypted-file"`
 selects the existing externally keyed encrypted backend for the cohort proof;
 launch tokens remain memory-only. An unavailable secure store is an error.
 
-When the work period elapses, requests report the same non-secret human renewal
-URL. Pending tool calls wait up to five minutes: open that URL once and approve
+When the work period elapses, interactive MCP connections show a Pi renewal
+prompt with the non-secret URL. Open it in your browser and approve a new work
+period with fresh TOTP. Pi waits up to five minutes, closes the prompt and
+connects automatically after approval; no callback paste or manual reconnect is
+needed. Escape cancels. This covers both new launches reusing a paused cohort and
+reconnecting enrolled sessions. Noninteractive connections retain manual renewal
+guidance rather than waiting for a prompt they cannot display.
+
+Pending tool calls wait up to five minutes: open that URL once and approve
 with the broker's fresh TOTP to release eligible calls without typing continue.
 Only validated API-v1 pre-execution pauses qualify, including the SDK credential
 preflight before dispatch. Calls with ambiguous outcomes are never replayed.

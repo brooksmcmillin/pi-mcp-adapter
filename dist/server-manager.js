@@ -12,6 +12,7 @@ import { logger } from "./logger.js";
 import { RESOURCE_MIME_TYPE } from "./ui-app-bridge-helpers.js";
 import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { McpOAuthProvider } from "./mcp-oauth-provider.js";
+import { CodingAuthorizationPaused, CodingCredentialPaused } from "./coding-call-recovery.js";
 import { explainRegistrationRejection, extractOAuthConfig, supportsOAuth } from "./mcp-auth-flow.js";
 import { captureOAuthAuthority, inspectAuthForUrl, invalidateAuthEntryCache, } from "./mcp-auth.js";
 import { getBearerTokenForUrl } from "./mcp-bearer-store.js";
@@ -206,6 +207,10 @@ export class McpServerManager {
     defaultCwd;
     connections = new Map();
     codingProviders = new WeakMap();
+    codingRenewalPrompt;
+    setCodingRenewalPrompt(prompt) {
+        this.codingRenewalPrompt = prompt;
+    }
     runPendingCodingCall(name, connection, call, options) {
         const provider = this.codingProviders.get(connection.client);
         if (!provider)
@@ -1118,6 +1123,8 @@ export class McpServerManager {
         // The transport's OAuth provider can register a client during connect, bypassing startAuth.
         if (error instanceof RegistrationRejectedError)
             return explainRegistrationRejection(error, resolveServerUrl(definition));
+        if (error instanceof CodingAuthorizationPaused || error instanceof CodingCredentialPaused)
+            return error;
         const originalMessage = error instanceof Error ? error.message : String(error);
         if (networkFailureCodes(error, ["ECONNREFUSED"]).length > 0 && isLoopbackUrl(resolveServerUrl(definition))) {
             const url = new URL(resolveServerUrl(definition));
@@ -1486,6 +1493,7 @@ export class McpServerManager {
             // Agent Plugins set httpTransport, and their declared transport is used without fallback.
             let kind = definition.httpTransport ?? "streamable-http";
             let invalidated = credentialsInvalidated;
+            let renewed = false;
             for (;;) {
                 const result = await attempt(kind);
                 if (result.status === "connected") {
@@ -1517,6 +1525,17 @@ export class McpServerManager {
                 }
                 if (signal?.aborted)
                     throwIfAborted(signal);
+                if (!renewed && this.codingRenewalPrompt && "provider" in authState
+                    && (result.error instanceof CodingAuthorizationPaused || result.error instanceof CodingCredentialPaused)) {
+                    const prompt = this.codingRenewalPrompt;
+                    await authState.provider.waitForCodingConnectionRenewal(result.error, {
+                        signal,
+                        check: () => { throwIfAborted(signal); oauthAuthority(); },
+                        onWait: (...args) => prompt(serverName, ...args),
+                    });
+                    renewed = true;
+                    continue;
+                }
                 if (authState.status === "implicit-deferred" && isUnauthorizedHttpError(result.error)) {
                     authState = { status: "implicit-challenged", provider: createAuthProvider() };
                     continue;

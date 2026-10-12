@@ -55,6 +55,8 @@ export declare class McpServerManager {
     private readonly defaultCwd?;
     private connections;
     private codingProviders;
+    private codingRenewalPrompt;
+    setCodingRenewalPrompt(prompt: typeof this.codingRenewalPrompt): void;
     runPendingCodingCall<T>(name: string, connection: ServerConnection, call: () => Promise<T>, options: import("./coding-call-recovery.ts").CodingWaitOptions): Promise<T>;
     private connectPromises;
     private connectOAuthAuthorities;

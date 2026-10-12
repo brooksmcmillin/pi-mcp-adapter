@@ -5,6 +5,14 @@ export declare class CodingAuthorizationPaused extends Error {
     readonly renewalUrl: string;
     constructor(reference: string, renewalUrl: string);
 }
+/** A credential request was rejected; this alone never authorizes replaying a tool. */
+export declare class CodingCredentialPaused extends Error {
+    readonly reference: string;
+    readonly renewalUrl: string;
+    constructor(reference: string, renewalUrl: string);
+}
+export type CodingRenewalPause = CodingAuthorizationPaused | CodingCredentialPaused;
+export type CodingRenewalPrompt = (pause: CodingRenewalPause, signal: AbortSignal, cancel: () => void) => void | Promise<void>;
 export declare function rejectedCodingReference(error: unknown): string | undefined;
 /** Normalize only a matching tools/call HTTP rejection; never parse error prose. */
 export declare function codingHttpRejection(response: Response, body: string): Promise<ProtocolError | undefined>;
@@ -14,6 +22,7 @@ export interface CodingWaitOptions {
     signal?: AbortSignal | undefined;
     check: () => void;
     notify?: ((message: string) => void) | undefined;
+    onWait?: CodingRenewalPrompt | undefined;
 }
 /** Holds only this invocation's closure; no model turn, persisted bearer or background replay. */
-export declare function waitForCodingRenewal(pause: CodingAuthorizationPaused, recover: (signal: AbortSignal) => Promise<void>, options: CodingWaitOptions): Promise<void>;
+export declare function waitForCodingRenewal(pause: CodingRenewalPause, recover: (signal: AbortSignal) => Promise<void>, options: CodingWaitOptions): Promise<void>;
