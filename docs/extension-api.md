@@ -2,6 +2,8 @@
 
 For extension authors, plugin authors, and apps that embed Pi: loading servers from plugins and packages, registering or calling servers at runtime, SDK configuration, host-managed embedding, and status events.
 
+For protocol capabilities beyond tool calls, trusted extensions can [register protocol methods and stream handlers](protocol-extensions.md). The adapter mediates their requests, routes correlated notifications, and manages connection lifetime without exposing its SDK client or transport.
+
 ## Agent Plugins
 
 The adapter can load MCP servers from [Agent Plugins](https://agent-plugins.org/) packages when you list plugin directories in `settings.agentPluginPaths`:

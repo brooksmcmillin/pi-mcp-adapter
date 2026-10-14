@@ -164,6 +164,8 @@ export async function applyProjectServerTrust(loaded, ctx) {
     catch {
         projectTrusted = false;
     }
+    // RPC sessions also have a UI, but Pi reads RPC input only after session_start, so a dialog here never resolves.
+    const interactive = ctx.hasUI && ctx.mode === "tui";
     const projectRoot = projectApprovalScope(ctx.cwd);
     const approvals = loadApprovals();
     for (const [name, source] of loaded.projectServers) {
@@ -172,13 +174,13 @@ export async function applyProjectServerTrust(loaded, ctx) {
             continue;
         const definitionHash = hashProjectServerDefinition(definition);
         const approved = approvals.approvals.some(entry => entry.projectRoot === projectRoot && entry.serverName === name && entry.definitionHash === definitionHash);
-        if (projectTrusted && (approved || (!ctx.hasUI && loaded.projectServerPolicy === "allow")))
+        if (projectTrusted && (approved || (!interactive && loaded.projectServerPolicy === "allow")))
             continue;
         let reason;
         if (!projectTrusted) {
             reason = "untrusted";
         }
-        else if (!ctx.hasUI) {
+        else if (!interactive) {
             reason = "approval-required";
         }
         else if (await ctx.ui.select(`Allow project MCP server “${name}”?\nProject config: ${source.path}\nEndpoint: ${describeServer(definition)}\n\nThis server can run local commands or make network requests with your user permissions.`, PROJECT_SERVER_CHOICES) === ALLOW_PROJECT_SERVER) {

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -13,6 +13,36 @@ function commandScript(source: string): string {
   writeFileSync(path, source);
   return path;
 }
+
+// Probe after cleanup settles, not while a busy host is still discovering processes.
+function helperProbe(marker: string): string {
+  return commandScript(`
+import { existsSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(marker + ".ready")}, "ready");
+setInterval(() => {
+  if (existsSync(${JSON.stringify(marker + ".probe")})) writeFileSync(${JSON.stringify(marker)}, "alive");
+}, 10);
+`);
+}
+
+async function expectHelperStopped(marker: string): Promise<void> {
+  writeFileSync(marker + ".probe", "probe");
+  await delay(220);
+  expect(existsSync(marker)).toBe(false);
+}
+
+it("detects a surviving helper with the post-cleanup probe", async () => {
+  const marker = join(mkdtempSync(join(tmpdir(), "pi-mcp-request-headers-")), "marker");
+  const child = spawn(process.execPath, [helperProbe(marker)], { stdio: "ignore" });
+  try {
+    await expect.poll(() => existsSync(marker + ".ready")).toBe(true);
+    await expect(expectHelperStopped(marker)).rejects.toThrow();
+  } finally {
+    const exited = new Promise(resolve => child.once("exit", resolve));
+    child.kill("SIGKILL");
+    await exited;
+  }
+});
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -185,13 +215,7 @@ describe("per-request HTTP header commands", () => {
 
   it.skipIf(process.platform === "win32")("kills helpers when the command exits unsuccessfully", async () => {
     const marker = join(mkdtempSync(join(tmpdir(), "pi-mcp-request-headers-")), "marker");
-    const helper = commandScript(`
-import { writeFileSync } from "node:fs";
-setTimeout(() => {
-  writeFileSync(${JSON.stringify(marker)}, "alive");
-}, 150);
-setInterval(() => {}, 1000);
-`);
+    const helper = helperProbe(marker);
     const script = commandScript(`
 import { spawn } from "node:child_process";
 spawn(process.execPath, [${JSON.stringify(helper)}], { stdio: "ignore" }).unref();
@@ -204,8 +228,7 @@ setTimeout(() => {
     await expect(fetch("https://mcp.example.test/mcp")).rejects.toThrow(
       "HTTP request headers command exited with code 7",
     );
-    await delay(220);
-    expect(existsSync(marker)).toBe(false);
+    await expectHelperStopped(marker);
   });
 
   it("fails closed on malformed command output", async () => {
@@ -218,13 +241,7 @@ setTimeout(() => {
 
   it.skipIf(process.platform === "win32")("kills helpers when the command returns valid output", async () => {
     const marker = join(mkdtempSync(join(tmpdir(), "pi-mcp-request-headers-")), "marker");
-    const helper = commandScript(`
-import { writeFileSync } from "node:fs";
-setTimeout(() => {
-  writeFileSync(${JSON.stringify(marker)}, "alive");
-}, 150);
-setInterval(() => {}, 1000);
-`);
+    const helper = helperProbe(marker);
     const script = commandScript(`
 import { spawn } from "node:child_process";
 spawn(process.execPath, [${JSON.stringify(helper)}], { stdio: "ignore" }).unref();
@@ -239,19 +256,12 @@ setTimeout(() => {
 
     const response = await fetch("https://mcp.example.test/mcp");
     expect(response.status).toBe(200);
-    await delay(220);
-    expect(existsSync(marker)).toBe(false);
+    await expectHelperStopped(marker);
   });
 
   it.skipIf(process.platform === "win32")("kills helpers when the command returns malformed output", async () => {
     const marker = join(mkdtempSync(join(tmpdir(), "pi-mcp-request-headers-")), "marker");
-    const helper = commandScript(`
-import { writeFileSync } from "node:fs";
-setTimeout(() => {
-  writeFileSync(${JSON.stringify(marker)}, "alive");
-}, 150);
-setInterval(() => {}, 1000);
-`);
+    const helper = helperProbe(marker);
     const script = commandScript(`
 import { spawn } from "node:child_process";
 spawn(process.execPath, [${JSON.stringify(helper)}], { stdio: "ignore" }).unref();
@@ -264,8 +274,7 @@ setTimeout(() => {
     await expect(fetch("https://mcp.example.test/mcp")).rejects.toThrow(
       "HTTP request headers command returned invalid JSON",
     );
-    await delay(220);
-    expect(existsSync(marker)).toBe(false);
+    await expectHelperStopped(marker);
   });
 
   it("kills a command that keeps running after timeout", async () => {
@@ -335,13 +344,7 @@ setInterval(() => {}, 1000);
 
   it.skipIf(process.platform === "win32")("kills descendants that reparent before timeout", async () => {
     const marker = join(mkdtempSync(join(tmpdir(), "pi-mcp-request-headers-")), "marker");
-    const descendant = commandScript(`
-import { writeFileSync } from "node:fs";
-setTimeout(() => {
-  writeFileSync(${JSON.stringify(marker)}, "alive");
-}, 150);
-setInterval(() => {}, 1000);
-`);
+    const descendant = helperProbe(marker);
     const spawner = commandScript(`
 import { spawn } from "node:child_process";
 spawn(process.execPath, [${JSON.stringify(descendant)}], { detached: true, stdio: "ignore" }).unref();
@@ -356,8 +359,7 @@ setInterval(() => {}, 1000);
     await expect(fetch("https://mcp.example.test/mcp")).rejects.toThrow(
       "HTTP request headers command timed out after 75ms",
     );
-    await delay(220);
-    expect(existsSync(marker)).toBe(false);
+    await expectHelperStopped(marker);
   });
 
   it.skipIf(process.platform === "win32")("fails closed before running the command when process discovery fails", async () => {

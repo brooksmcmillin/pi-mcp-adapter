@@ -10,6 +10,8 @@ export declare function isUnauthorizedHttpError(error: unknown): boolean;
 export interface ServerConnection {
     client: Client;
     transport: Transport;
+    /** Internal SDK envelope accessor; never exposed through the protocol extension API. */
+    requestMetadata?: () => Readonly<Record<string, unknown>> | undefined;
     definition: ServerDefinition;
     tools: McpTool[];
     /** Cache hints from the server's aggregated tools/list result. */
@@ -25,6 +27,8 @@ export interface ServerConnection {
     instructions?: string;
     lastUsedAt: number;
     inFlight: number;
+    /** Active protocol requests/streams on this transport; never inherited by reconnects. */
+    activeProtocolOperations?: number;
     status: "connected" | "closed" | "needs-auth";
     /** Catalog subscription health, tracked independently from transport health. */
     listenState: McpListenState;

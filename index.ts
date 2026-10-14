@@ -1,3 +1,5 @@
+import { registerProtocolBridge } from "./runtime-protocol.ts";
+export { registerMcpProtocol, MCP_PROTOCOL_EVENT, type McpProtocolDefinition, type McpProtocol, type McpProtocolSession, type McpProtocolStream, type McpProtocolWatch, type McpProtocolEnd } from "./runtime-protocol.ts";
 import { withFileMutationQueue, type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext, type RegisteredMcpServer, type ToolInfo } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
@@ -24,6 +26,8 @@ import { syncNamespaceProxyTools } from "./namespace-tools.ts";
 import { restoreSessionApprovalState } from "./session-approvals.ts";
 import { createRetryableLoader } from "./lazy-loader.ts";
 import { toToolParameters } from "./tool-parameters.ts";
+import { readPanelOpenKeys } from "./panel-keys.ts";
+import { getAgentPath } from "./agent-dir.ts";
 
 export type { McpAdapterOptions } from "./types.ts";
 export type { ServerEntry } from "./types.ts";
@@ -992,6 +996,26 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     })();
   });
 
+  registerProtocolBridge(pi, async name => {
+    if (!sessionCtx) throw new Error("MCP connections require an active Pi session");
+    const target = await ensureSessionRuntime(sessionCtx);
+    if (!target) throw new Error("MCP is not initialized");
+    const guard = captureRuntimeGuard(target);
+    const definition = target.config.mcpServers[name];
+    if (!Object.hasOwn(target.config.mcpServers, name) || !definition || isServerDisabled(definition)) {
+      throw new Error("MCP server is not configured or enabled");
+    }
+    const core = await loadForRuntime(loadCoreRuntime, guard);
+    if (!await core.lazyConnect(target, name, target.owner.signal)) throw new Error("MCP server could not connect; check /mcp-adapter");
+    assertRuntimeGuard(guard);
+    if (target.config.mcpServers[name] !== definition || isServerDisabled(definition)) {
+      throw new Error("MCP server configuration changed while connecting");
+    }
+    const connection = target.manager.getConnection(name);
+    if (!connection || connection.status !== "connected") throw new Error("MCP connection is unavailable");
+    return { connection, signal: target.owner.signal };
+  });
+
   // Compares registrations with the active session's config, so it runs only once state exists.
   function applyPiMcpServers(activeState: McpExtensionState, ctx: ExtensionContext): Promise<void> {
     const next = new Map(piRegistered.map((server) => [server.name, JSON.stringify(server.config)]));
@@ -1320,7 +1344,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     }
 
     if (generation !== lifecycleGeneration || !owner.isActive()) return;
-    if (!programmaticConfig && piSupportsMcp(pi)) {
+    // An explicit config path marks a one-off process; Pi already skips its built-in for it because /mcp is ours.
+    if (!programmaticConfig && earlyConfigPath === undefined && piSupportsMcp(pi)) {
       const report = (message: string, level: "info" | "warning") => {
         if (generation !== lifecycleGeneration || !owner.isActive()) return;
         if (ctx.hasUI) ctx.ui.notify(message, level);
@@ -1698,6 +1723,16 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   registerMcpCommand("mcp-adapter");
   // /mcp at load replaces Pi 0.99+'s built-in MCP; a supplied config doesn't read Pi's files, so it keeps the built-in.
   if (!programmaticConfig || !piSupportsMcp(pi)) registerMcpCommand("mcp");
+  // Opt-in `mcp.panel.open` keys open the panel without touching the editor draft.
+  // Shortcut handlers get no reload(), so dispatch the command: its context has one.
+  if (!programmaticConfig) {
+    for (const key of readPanelOpenKeys(getAgentPath("keybindings.json"))) {
+      pi.registerShortcut(key, {
+        description: "Open the MCP panel",
+        handler: () => pi.sendUserMessage("/mcp-adapter", { expandPromptTemplates: true }),
+      });
+    }
+  }
 
   pi.registerCommand("mcp-auth", {
     description: "Authenticate with an MCP server (OAuth)",

@@ -81,6 +81,8 @@ export interface McpTraceObserver {
 export declare function isMcpTraceEnabled(definition: {
     trace?: boolean;
 }, settings?: McpTraceSettings): boolean;
+/** The handler behind the trace wrapper, so a chained router forwards without tracing the frame again. */
+export declare function untracedMessageHandler(transport: Transport): Transport["onmessage"];
 /**
  * Compose the SDK's transport callbacks in place instead of replacing the
  * transport object. SDK v2 detects its base stdio transport before connect so

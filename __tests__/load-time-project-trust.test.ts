@@ -1,3 +1,13 @@
+import { registerMcpProtocol } from "../runtime-protocol.ts";
+const testProtocols = new WeakMap<object, ReturnType<typeof registerMcpProtocol>>();
+const testProtocolSession = (pi: any, name: string) => {
+  let protocol = testProtocols.get(pi);
+  if (!protocol) {
+    protocol = registerMcpProtocol(pi, { namespace: "demo", requests: ["demo/list"], streams: ["demo/stream"], notifications: ["notifications/demo/event"] });
+    testProtocols.set(pi, protocol);
+  }
+  return protocol.connect(name);
+};
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -7,20 +17,22 @@ const connect = vi.hoisted(() => vi.fn(async (name: string) => {
   throw new Error(`${name} offline`);
 }));
 
+const makeManager = vi.hoisted(() => function (this: any) {
+  this.setDefaultRequestTimeoutMs = vi.fn();
+  this.setAuthStorageOptions = vi.fn();
+  this.setCodingRenewalPrompt = vi.fn();
+  this.setSamplingConfig = vi.fn();
+  this.setElicitationConfig = vi.fn();
+  this.getConnection = vi.fn();
+  this.getAllConnections = vi.fn(() => new Map());
+  this.isConnecting = vi.fn(() => false);
+  this.connect = connect;
+  this.close = vi.fn(async () => {});
+  this.closeAll = vi.fn(async () => {});
+});
 vi.mock("../server-manager.ts", async (importOriginal) => ({
   ...await importOriginal<typeof import("../server-manager.ts")>(),
-  McpServerManager: vi.fn().mockImplementation(function (this: any) {
-    this.setDefaultRequestTimeoutMs = vi.fn();
-    this.setAuthStorageOptions = vi.fn();
-    this.setSamplingConfig = vi.fn();
-    this.setElicitationConfig = vi.fn();
-    this.getConnection = vi.fn();
-    this.getAllConnections = vi.fn(() => new Map());
-    this.isConnecting = vi.fn(() => false);
-    this.connect = connect;
-    this.close = vi.fn(async () => {});
-    this.closeAll = vi.fn(async () => {});
-  }),
+  McpServerManager: vi.fn().mockImplementation(makeManager),
 }));
 
 function writeJson(path: string, value: unknown): void {
@@ -31,6 +43,7 @@ function writeJson(path: string, value: unknown): void {
 function createPi() {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let activeTools: string[] = [];
+  const listeners = new Map<string, (data: unknown) => void>();
   return {
     handlers,
     api: {
@@ -42,7 +55,7 @@ function createPi() {
       on: vi.fn((event: string, handler: (...args: any[]) => unknown) => {
         handlers.set(event, handler);
       }),
-      events: { on: vi.fn(), emit: vi.fn() },
+      events: { on: (name: string, fn: (data: unknown) => void) => listeners.set(name, fn), emit: (name: string, data: unknown) => listeners.get(name)?.(data) },
       getAllTools: vi.fn(() => []),
       getCommands: vi.fn(() => []),
       getActiveTools: vi.fn(() => activeTools),
@@ -57,11 +70,12 @@ describe("load-time initialization with project server overrides", () => {
   let root: string;
   let cwd: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "mcp-load-time-trust-")));
     const home = join(root, "home");
     cwd = join(root, "project");
     vi.resetModules();
+    vi.mocked((await import("../server-manager.ts")).McpServerManager).mockImplementation(makeManager);
     connect.mockClear();
     vi.stubEnv("HOME", home);
     vi.stubEnv("PI_PACKAGE_DIR", "");
@@ -101,7 +115,7 @@ describe("load-time initialization with project server overrides", () => {
     await pi.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {
       cwd,
       hasUI: true,
-      mode: "rpc",
+      mode: "tui",
       isProjectTrusted: () => true,
       ui: { select, notify: vi.fn(), setStatus: vi.fn(), theme: undefined },
       modelRegistry: {},
@@ -114,4 +128,19 @@ describe("load-time initialization with project server overrides", () => {
 
     await pi.handlers.get("session_shutdown")?.({ type: "session_shutdown" });
   });
+
+  it.each([false, true])("protocol extensions do not bypass project approval (trusted=%s)", async trusted => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { default: mcpAdapter } = await import("../index.ts");
+    const pi = createPi();
+    mcpAdapter(pi.api);
+    await pi.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {
+      cwd, hasUI: false, mode: "rpc", isProjectTrusted: () => trusted, modelRegistry: {},
+    });
+    await expect(testProtocolSession(pi.api, "equibles")).rejects.toThrow("not configured or enabled");
+    expect(connect.mock.calls.map(call => call[0])).not.toContain("equibles");
+    await pi.handlers.get("session_shutdown")?.({ type: "session_shutdown" });
+  });
+
 });

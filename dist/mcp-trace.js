@@ -164,6 +164,11 @@ export function createMcpTraceWriter(sessionCwd, settings = {}, randomSuffix = M
 export function isMcpTraceEnabled(definition, settings) {
     return definition.trace ?? settings?.enabled === true;
 }
+const untracedMessageHandlers = new WeakMap();
+/** The handler behind the trace wrapper, so a chained router forwards without tracing the frame again. */
+export function untracedMessageHandler(transport) {
+    return untracedMessageHandlers.get(transport)?.() ?? transport.onmessage;
+}
 /**
  * Compose the SDK's transport callbacks in place instead of replacing the
  * transport object. SDK v2 detects its base stdio transport before connect so
@@ -200,6 +205,7 @@ export function wrapTransportWithMcpTrace(transport, server, transportKind, obse
             },
         });
         transport.onmessage = messageHandler;
+        untracedMessageHandlers.set(transport, () => messageHandler);
     }
     catch {
         // Some future transport may make onmessage non-configurable. Keep tracing
