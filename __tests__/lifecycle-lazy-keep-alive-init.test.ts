@@ -69,6 +69,7 @@ function createManager() {
   const manager = {
     setDefaultRequestTimeoutMs: vi.fn(),
     setAuthStorageOptions: vi.fn(),
+    setCodingRenewalPrompt: vi.fn(),
     setMetadataListChangedListener: vi.fn((listener) => {
       metadataListChanged = listener;
     }),
@@ -322,6 +323,7 @@ describe("lazy-keep-alive initializeMcp integration", () => {
       registerTool: vi.fn((tool: any) => registeredTools.set(tool.name, tool)),
       registerFlag: vi.fn(),
       registerCommand: vi.fn(),
+      registerShortcut: vi.fn(),
       on: vi.fn((event: string, handler: (...args: any[]) => unknown) => handlers.set(event, handler)),
       getAllTools: vi.fn(() => []),
       getActiveTools: vi.fn(() => ["mcp"]),

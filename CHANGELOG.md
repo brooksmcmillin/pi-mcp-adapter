@@ -7,20 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-10-12
+
+### Highlights
+
+- Open the MCP panel with a key of your choice, without losing the prompt you are typing.
+- Pi in RPC mode, as used by hosts such as Paseo, no longer hangs at startup in a project with MCP servers you have not approved yet.
+- The Parallel Search preset now tells Parallel that requests come from pi-mcp-adapter, with no user or install details.
+
 ### Added
 
-- OAuth credentials can use session-only storage with `settings.oauthPersistence: "session"`, isolating concurrent Pi sessions without persisting tokens.
-- `/mcp-adapter setup` can add Tavily Search, an opt-in preset for web search and page extraction through Tavily's [keyless access](https://docs.tavily.com/documentation/keyless), with no account, API key, or sign-in. Usage is rate-limited. `tavily_search` and `tavily_extract` are direct tools; Tavily's other tools need an API key and stay behind the proxy. Thanks to [@lakshyaag-tavily](https://github.com/lakshyaag-tavily) for [PR #800](https://github.com/nicobailon/pi-mcp-adapter/pull/800).
-- Server entries accept `"openUi": false` to stop that server's MCP App UIs from opening; its tools still run and return inline results. Thanks to [@tekumara](https://github.com/tekumara) for [#803](https://github.com/nicobailon/pi-mcp-adapter/issues/803).
+- You can open the MCP panel from a key you choose, so turning a server on or off no longer means clearing the prompt you are typing. Bind `mcp.panel.open` in Pi's `keybindings.json`, for example `{ "mcp.panel.open": "alt+m" }`. There is no default key. Thanks to [@Milor123](https://github.com/Milor123) for [#822](https://github.com/nicobailon/pi-mcp-adapter/issues/822).
 
 ### Changed
 
-- Support Pi 1.0.0 by accepting its `@earendil-works/pi-ai` peer version and validating against Pi 1.0.0 host packages. Thanks to [@lucascaro](https://github.com/lucascaro) for [PR #801](https://github.com/nicobailon/pi-mcp-adapter/pull/801).
+- The Parallel Search preset in `/mcp setup` now sends `User-Agent: pi-mcp-adapter`, so Parallel can see traffic from this project. It is a fixed project name with no user or install details. Existing `mcp.json` entries are unchanged. Thanks to [@georgeatparallel](https://github.com/georgeatparallel) for [#821](https://github.com/nicobailon/pi-mcp-adapter/pull/821).
 
 ### Fixed
 
-- `pi -p` no longer hangs after replying when a kept-alive HTTP server uses a `bearerToken` command or `auth.provider`: closing the server now ends its open event stream. Thanks to [@nguyentamdat](https://github.com/nguyentamdat) for [PR #802](https://github.com/nicobailon/pi-mcp-adapter/pull/802).
-- Apps that import the adapter directly, outside Pi's extension loader, no longer fail with `Cannot find package '@earendil-works/pi-tui'`. `@earendil-works/pi-tui` and `typebox` are now required peers because the adapter imports them at runtime, so npm installs them for those apps. Pi's own package installs skip peers and are unchanged; `@earendil-works/pi-ai` is only used for types and stays optional. Thanks to [@dannote](https://github.com/dannote) for [#805](https://github.com/nicobailon/pi-mcp-adapter/issues/805).
+- Pi in RPC mode no longer hangs at startup when the project has an MCP server you have not approved, or when there is a Pi sign-in the adapter has not imported yet. The adapter asked in a dialog, but Pi can't answer dialogs until startup finishes, so hosts such as Paseo saw Pi never respond. RPC sessions now skip unapproved project servers, as the docs describe, and admit them when your user-level `"projectServers"` setting is `"allow"`. Those two dialogs now appear only in the interactive terminal UI. Thanks to [@itssimon](https://github.com/itssimon) for [#825](https://github.com/nicobailon/pi-mcp-adapter/pull/825).
+
+## [5.2.0] - 2026-10-09
+
+### Highlights
+
+- Fixes the MCP SDK security advisory GHSA-6qxp-vccf-f47h, so a malicious MCP server can no longer collect the tokens saved from an earlier sign-in.
+- When the model lists a server's tools, it now sees each tool's parameter names, so fewer calls fail on guessed argument names.
+- `pi-mcp-adapter doctor` now agrees with Pi about which project servers are trusted.
+- Jev semantic search can use a System One server running on your own machine.
+
+### Changed
+
+- `mcp({ server })` now lists each tool's parameter names, required ones first, for example `get_record(record_id, fields?)`. Models used to guess names like `id` for `record_id` and lose a turn to the validation error. Types and nested fields are still shown only by `describe`. Thanks to [@rakesh-vs](https://github.com/rakesh-vs) for [PR #817](https://github.com/nicobailon/pi-mcp-adapter/pull/817).
+
+### Fixed
+
+- `pi-mcp-adapter doctor` no longer reports project servers as blocked by project trust when a Pi session in the same folder would trust the project. When the adapter is installed as a Pi package, the doctor now finds Pi through the `pi` on your PATH. Like Pi, it trusts a project that has no Pi-specific project files, such as `.pi/settings.json`. Thanks to [@felipe-saavedra](https://github.com/felipe-saavedra) for reporting it in [#809](https://github.com/nicobailon/pi-mcp-adapter/issues/809).
+- Running Pi once with `--mcp-config <file>`, for example `pi -e <adapter> --mcp-config <file> -p ...`, no longer adds `"-builtin:mcp"` to your Pi `settings.json`. The same goes for a `configPath` passed to `createMcpAdapter()`. Pi already leaves its built-in MCP out of those runs. An installed adapter without a config path still turns the built-in off once, as before. Thanks to [@deniskern](https://github.com/deniskern) for reporting it in [#811](https://github.com/nicobailon/pi-mcp-adapter/issues/811).
+- `SYSTEMONE_ENDPOINT` can point at a System One server on your own machine, such as `http://127.0.0.1:8080/v1/systemone`. Plain `http` is accepted only on `localhost`, `127.0.0.0/8`, and `[::1]`; every other endpoint still needs `https`. A local server that ignores keys still needs some non-empty `SYSTEMONE_API_KEY`. Thanks to [@amchen2310](https://github.com/amchen2310) for reporting it in [#810](https://github.com/nicobailon/pi-mcp-adapter/issues/810).
+
+### Security
+
+- The MCP SDK packages move from 2.0.0 to 2.3.1, which fixes [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h). With 2.0.0, a malicious or compromised MCP server could point sign-in at its own authorization server and receive the refresh token and client secret saved from an earlier sign-in. `npm audit` no longer flags the adapter. One side effect: a server URL that redirects to a different host is no longer followed, so put the final URL in your config. A redirect from `http` to `https` on the same host still works. Thanks to [@cash-flow-king](https://github.com/cash-flow-king) for reporting it in [#816](https://github.com/nicobailon/pi-mcp-adapter/issues/816) and to [@rakesh-vs](https://github.com/rakesh-vs) for [PR #819](https://github.com/nicobailon/pi-mcp-adapter/pull/819).
+
+## [5.1.0] - 2026-10-05
+
+### Highlights
+
+- The adapter works with Pi 1.0.0.
+- `/mcp-adapter setup` can add Tavily Search for web search and page extraction, with no account or API key.
+- You can keep a server's MCP App UIs from opening with `"openUi": false` and still use its tools.
+- Other Pi extensions can build on MCP features beyond tool calls, such as the draft MCP Events extension, using the servers and sign-ins you already set up.
+- `pi -p` no longer hangs after replying when an HTTP server signs in with a token command or a Pi `/login` provider.
+
+### Added
+
+- OAuth credentials can use session-only storage with `settings.oauthPersistence: "session"`, isolating concurrent Pi sessions without persisting tokens.
+- `/mcp-adapter setup` can add Tavily Search for web search and page extraction. It uses Tavily's [keyless access](https://docs.tavily.com/documentation/keyless), so there is no account, API key, or sign-in; usage is rate-limited. `tavily_search` and `tavily_extract` are direct tools. Tavily's other tools need an API key and stay behind the proxy. Thanks to [@lakshyaag-tavily](https://github.com/lakshyaag-tavily) for [PR #800](https://github.com/nicobailon/pi-mcp-adapter/pull/800).
+- Server entries accept `"openUi": false` to stop that server's MCP App UIs from opening. Its tools still run and return their results inline. Thanks to [@tekumara](https://github.com/tekumara) for [#803](https://github.com/nicobailon/pi-mcp-adapter/issues/803).
+- Other Pi extensions can add MCP features beyond tool calls, such as the draft MCP Events extension, with `registerMcpProtocol`. An extension declares the requests, streams, and notifications it uses, and the adapter sends them to your configured servers with the same sign-in, project trust, and server approval as tool calls. Extensions never get the raw connection. Registering starts no servers and adds nothing to the model's context. See [protocol extensions](docs/protocol-extensions.md). Thanks to [@mikekelly](https://github.com/mikekelly) for [PR #807](https://github.com/nicobailon/pi-mcp-adapter/pull/807).
+
+### Changed
+
+- Works with Pi 1.0.0. Thanks to [@lucascaro](https://github.com/lucascaro) for [PR #801](https://github.com/nicobailon/pi-mcp-adapter/pull/801).
+
+### Fixed
+
+- `pi -p` no longer hangs after replying when a kept-alive HTTP server uses a `bearerToken` command or `auth.provider`. Closing the server now ends its open event stream. Thanks to [@nguyentamdat](https://github.com/nguyentamdat) for [PR #802](https://github.com/nicobailon/pi-mcp-adapter/pull/802).
+- Apps that import the adapter directly, instead of loading it through Pi, no longer fail with `Cannot find package '@earendil-works/pi-tui'`. npm now installs `@earendil-works/pi-tui` and `typebox` with the adapter, because it uses them at runtime. Installs through Pi are unchanged. Thanks to [@dannote](https://github.com/dannote) for [#805](https://github.com/nicobailon/pi-mcp-adapter/issues/805).
 
 ## [5.0.0] - 2026-10-01
 

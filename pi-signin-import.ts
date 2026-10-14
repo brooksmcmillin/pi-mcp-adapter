@@ -111,11 +111,12 @@ export function importPiSignIn(candidate: PiSignInImport, authStorageOptions: Au
  * "Sign in again" leaves everything as it is, so the user signs in later with /mcp-auth.
  */
 export async function offerPiSignInImports(
-  ctx: Pick<ExtensionContext, "hasUI" | "ui" | "cwd">,
+  ctx: Pick<ExtensionContext, "hasUI" | "mode" | "ui" | "cwd">,
   config: McpConfig,
   signal?: AbortSignal,
 ): Promise<void> {
-  if (!ctx.hasUI || config.settings?.oauthPersistence === "session") return;
+  // RPC sessions cannot answer startup dialogs until session_start finishes.
+  if (!ctx.hasUI || ctx.mode !== "tui" || config.settings?.oauthPersistence === "session") return;
   const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, ctx.cwd, config.settings?.oauthPersistence, config.settings?.oauthCredentialStore);
   const asked = loadOnboardingState().piSignInImportsAsked ?? [];
   const candidates = matchPiSignIns(config, authStorageOptions)
