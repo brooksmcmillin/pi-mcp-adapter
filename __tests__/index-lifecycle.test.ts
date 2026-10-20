@@ -984,6 +984,37 @@ describe("mcpAdapter session lifecycle", () => {
     expect(state.directToolCounts).toEqual(new Map([["demo", 2]]));
   });
 
+  it.each([false, true])("keeps frozen-tool initialization output debug-only (debug=%s)", async (debug) => {
+    vi.stubEnv("MCP_UI_DEBUG", debug ? "1" : "");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const debugLog = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const config = {
+      settings: { freezeDirectTools: true },
+      mcpServers: { demo: { command: "demo", directTools: true } },
+    };
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.resolveDirectTools.mockReturnValue([directToolSpec]);
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    try {
+      const { api, handlers } = await loadAdapter();
+      await handlers.get("session_start")?.({}, { hasUI: true });
+      await vi.waitFor(() => expect(mocks.updateStatusBar).toHaveBeenCalledWith(state));
+
+      expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "demo_search" }));
+      expect(log).not.toHaveBeenCalled();
+      if (debug) {
+        expect(debugLog).toHaveBeenCalledWith(expect.stringContaining("direct tools frozen after initial sync"));
+      } else {
+        expect(debugLog).not.toHaveBeenCalled();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("does not refresh frozen direct tools on failure-backoff metadata updates", async () => {
     const config = {
       settings: { freezeDirectTools: true },

@@ -1185,7 +1185,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         guard();
         if (earlyConfig.settings?.freezeDirectTools === true) {
           directToolsFrozen = true;
-          logger.info("MCP: direct tools frozen after initial sync — metadata can refresh without rebuilding the active tool surface");
+          // Routine initialization must not write over Pi's interactive editor.
+          logger.debug("MCP: direct tools frozen after initial sync — metadata can refresh without rebuilding the active tool surface");
         }
         guard();
         initPromise = null;
