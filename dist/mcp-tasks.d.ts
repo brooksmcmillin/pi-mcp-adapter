@@ -22,7 +22,7 @@
  * servers keep the exact pre-existing call path.
  */
 import type { Client, CreateMessageRequest, CreateMessageResult, ElicitRequest, ElicitResult, Transport } from "@modelcontextprotocol/client";
-import { type RawClientDispatch, type TaskEnabledSession } from "@modelcontextprotocol/ext-tasks/client";
+import { type ApplicationRoot, type RawClientDispatch, type TaskEnabledSession } from "@modelcontextprotocol/ext-tasks/client";
 import type { ServerDefinition } from "./types.ts";
 export declare const TASKS_EXTENSION_ID = "io.modelcontextprotocol/tasks";
 /**
@@ -75,6 +75,8 @@ export interface AttachTaskSessionOptions {
     clientCapabilities: Record<string, unknown>;
     onElicitation?: (request: ElicitRequest, signal?: AbortSignal) => Promise<ElicitResult>;
     onSampling?: (request: CreateMessageRequest, signal?: AbortSignal) => Promise<CreateMessageResult>;
+    /** What a task's roots input request gets; the same list the connection's roots/list handler returns. */
+    roots?: ApplicationRoot[] | undefined;
 }
 export interface TaskSessionAttachment {
     session: TaskEnabledSession;

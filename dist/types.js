@@ -96,6 +96,13 @@ function encodeServerNamespace(name) {
     }).join("");
 }
 export const MCP_TOOL_APPROVAL_REQUEST_EVENT = "pi-mcp-adapter:tool-approval-request";
+/** The line `/mcp-adapter` and `doctor` show for a server's ignored settings. */
+export function describeIgnoredSettings(provenance) {
+    if (!provenance?.ignoredSettings)
+        return undefined;
+    const file = provenance.ignoredSettingsSource === "opencode" ? "OpenCode" : "Pi mcp.json";
+    return `Ignored ${file} settings: ${provenance.ignoredSettings.join(", ")}`;
+}
 /**
  * Get server prefix based on tool prefix mode.
  */

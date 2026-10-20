@@ -15,6 +15,13 @@ export declare function interpolateEnvVars(value: string, environment: NodeJS.Pr
 export declare function getMissingEnvVars(value: string, environment?: NodeJS.ProcessEnv): string[];
 export declare function toStringRecord(value: unknown): Record<string, string> | undefined;
 export declare function interpolateEnvRecord(values: Record<string, string> | undefined, environment?: NodeJS.ProcessEnv): Record<string, string> | undefined;
+/**
+ * On Windows, the bash used to run `!command` values: Git Bash in its standard
+ * install locations, then bash.exe on PATH (skipping the legacy WSL launcher),
+ * as Pi does. Undefined elsewhere or when none is found, so callers keep the
+ * platform default shell.
+ */
+export declare function getWindowsCommandBash(): string | undefined;
 /** Resolve a secret value, executing only a single leading `!` command marker. */
 export declare function resolveCommandSecret(value: string, context: string): string;
 export declare function resolveCommandSecret(value: undefined, context: string): undefined;

@@ -1,5 +1,7 @@
 import { mkdirSync, statSync } from "node:fs";
 import { BlockList, isIP } from "node:net";
+import { basename } from "node:path";
+import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Client, SdkError, SdkErrorCode, SdkHttpError, SseError, SSEClientTransport, StreamableHTTPClientTransport, UnauthorizedError, RegistrationRejectedError, } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -17,6 +19,8 @@ import { explainRegistrationRejection, extractOAuthConfig, supportsOAuth } from 
 import { captureOAuthAuthority, inspectAuthForUrl, invalidateAuthEntryCache, } from "./mcp-auth.js";
 import { getBearerTokenForUrl } from "./mcp-bearer-store.js";
 import { handleSamplingRequest, registerSamplingHandler } from "./sampling-handler.js";
+import { appendServerLogMessage } from "./server-log.js";
+import { getAgentPath } from "./agent-dir.js";
 import { handleElicitationRequest, handleUrlElicitation, registerElicitationHandler, } from "./elicitation-handler.js";
 import { attachTaskSession } from "./mcp-tasks.js";
 import { interpolateEnvVars, expandHomePath, providerAuthUrlError, resolveBearerToken, resolveCommandSecretsRecord, resolveConfigPath, resolveServerUrl, } from "./utils.js";
@@ -254,7 +258,7 @@ export class McpServerManager {
     traceWriter;
     providerToken;
     stopped = false;
-    /** Default cwd for stdio servers without an explicit config `cwd`. */
+    /** Session cwd: the root sent to servers, and the default cwd for stdio servers without a config `cwd`. */
     constructor(defaultCwd) {
         this.defaultCwd = defaultCwd;
     }
@@ -1044,7 +1048,8 @@ export class McpServerManager {
                         transport,
                         requestTimeoutMs: this.getResolvedRequestTimeoutMs(definition),
                         clientInfo: { name: `pi-mcp-${name}`, version: "1.0.0" },
-                        clientCapabilities: this.buildClientCapabilities(),
+                        clientCapabilities: this.buildClientCapabilities(definition),
+                        roots: this.rootsFor(definition),
                         ...(this.elicitationConfig
                             ? {
                                 onElicitation: (request, signal) => handleElicitationRequest({
@@ -1183,14 +1188,14 @@ export class McpServerManager {
             signal?.removeEventListener("abort", closeTransport);
         }
     }
-    buildClientCapabilities() {
+    buildClientCapabilities(definition) {
         return {
-            extensions: {
-                "io.modelcontextprotocol/ui": {
-                    mimeTypes: [RESOURCE_MIME_TYPE],
-                },
-            },
+            // openUi: false tells the server there is no UI, so MCP App tools return results instead of deferring to a form.
+            ...(definition.openUi === false
+                ? {}
+                : { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: [RESOURCE_MIME_TYPE] } } }),
             ...(this.samplingConfig ? { sampling: {} } : {}),
+            ...(this.rootsFor(definition) ? { roots: {} } : {}),
             ...(this.elicitationConfig
                 ? {
                     elicitation: {
@@ -1201,8 +1206,14 @@ export class McpServerManager {
                 : {}),
         };
     }
+    /** The session directory as the server's only root, unless there is no session cwd or the server opted out. */
+    rootsFor(definition) {
+        if (this.defaultCwd === undefined || definition.roots === false)
+            return undefined;
+        return [{ uri: pathToFileURL(this.defaultCwd).href, name: basename(this.defaultCwd) }];
+    }
     createClient(serverName, definition) {
-        const capabilities = this.buildClientCapabilities();
+        const capabilities = this.buildClientCapabilities(definition);
         const versionNegotiation = resolveVersionNegotiation(definition);
         let client;
         client = new AdapterClient({ name: `pi-mcp-${serverName}`, version: "1.0.0" }, {
@@ -1228,6 +1239,13 @@ export class McpServerManager {
             },
         });
         clientMetadata.set(client, () => client.requestMetadata());
+        const roots = this.rootsFor(definition);
+        if (roots)
+            client.setRequestHandler("roots/list", () => ({ roots }));
+        let logPath;
+        client.setNotificationHandler("notifications/message", notification => {
+            appendServerLogMessage(logPath ??= getAgentPath("mcp.log"), serverName, notification.params);
+        });
         if (this.samplingConfig) {
             registerSamplingHandler(client, { ...this.samplingConfig, serverName });
         }

@@ -264,7 +264,7 @@ export async function attachTaskSession(options) {
                 content: result.content,
             };
         },
-        roots: async () => ({ roots: [] }),
+        roots: async () => ({ roots: options.roots ?? [] }),
     });
     const channel = new RawRequestChannel(options.transport, options.requestTimeoutMs);
     channel.attach();

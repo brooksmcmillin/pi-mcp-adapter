@@ -1,6 +1,6 @@
 {
   "name": "pi-mcp-adapter",
-  "version": "5.3.0",
+  "version": "5.3.2",
   "description": "MCP (Model Context Protocol) adapter extension for Pi coding agent",
   "type": "module",
   "types": "./index.ts",
@@ -121,6 +121,7 @@
     "claude-plugin-loader.ts",
     "package-mcp-loader.ts",
     "server-manager.ts",
+    "server-log.ts",
     "bearer-command-resolver.ts",
     "http-ca.ts",
     "request-headers-command.ts",

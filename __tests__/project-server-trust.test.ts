@@ -1,13 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 function writeJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value)}\n`);
 }
+
+const caseInsensitiveFs = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "mcp-case-probe-"));
+  try {
+    return existsSync(join(dirname(probe), basename(probe).toUpperCase()));
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
 
 describe("project MCP server trust", () => {
   let root: string;
@@ -135,6 +144,19 @@ describe("project MCP server trust", () => {
     expect(result.blockedServers.size).toBe(0);
     expect(select).toHaveBeenCalledTimes(2);
     expect(statSync(join(home, ".pi", "agent", "mcp-project-approvals.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(!caseInsensitiveFs)("keeps an approval when the same project folder is opened with different casing", async () => {
+    writeJson(join(cwd, ".mcp.json"), { mcpServers: { local: { command: "node", args: ["one.js"] } } });
+    const differentlyCased = join(root, "PROJECT");
+    const { config, trust } = await load();
+    const select = vi.fn().mockResolvedValue("Allow");
+
+    await trust.applyProjectServerTrust(config.loadMcpConfigWithSources(undefined, differentlyCased), context({ cwd: differentlyCased, hasUI: true, mode: "tui", ui: { select } }));
+    const result = await trust.applyProjectServerTrust(config.loadMcpConfigWithSources(undefined, cwd), context({ hasUI: true, mode: "tui", ui: { select } }));
+
+    expect(result.blockedServers.size).toBe(0);
+    expect(select).toHaveBeenCalledTimes(1);
   });
 
   it("shares approvals across a repository's git worktrees but not with directories that only claim one", async () => {

@@ -57,9 +57,10 @@ In the configuration examples below, `30000` is illustrative only. If `requestTi
 | `includeTools` | `string[]` of tool names or glob patterns to expose (matches original names like `get_screenshot`, generated resource names like `read_figjam`, and prefixed names like `figma_get_screenshot`) |
 | `excludeTools` | `string[]` of tool names or glob patterns to hide (applied after `includeTools`) |
 | `searchKeywords` | `{ "tool-or-glob": ["keyword", ...] }` — extra keywords that boost `mcp({ search })` ranking for matching tools; never shown to the model |
-| `openUi` | Set to `false` to never open MCP App UIs for this server's tools (default: true). Its tools still run and return their results inline; sign-in and URL elicitation are unaffected |
+| `openUi` | Set to `false` to never open MCP App UIs for this server's tools (default: true). The server is told the host has no UI, so tools that would defer to an MCP App form run and return their results inline; sign-in and URL elicitation are unaffected |
+| `roots` | Set to `false` to not send this server the Pi session directory as its root (default: true). Use it for servers that let client roots replace the directories in their own args, such as the official filesystem server, when those directories should stay in force |
 | `description` | What the server offers, in a sentence (same key as Pi's `mcp.json`). `mcp({ server })` shows it under the listing header, `mcp({ search })` ranks the server's tools by it like tool descriptions, and the `/mcp-adapter` panel shows it when the server is expanded. Without it, the panel shows the first line of the server's instructions. A non-string value is ignored with a warning. |
-| `debug` | Show server stderr (default: false) |
+| `debug` | Show server stderr (default: false). Log messages a server sends over MCP always go to `~/.pi/agent/mcp.log`, which moves to `mcp.log.1` past 5 MB |
 | `trace` | Enable metadata-only JSONL protocol tracing for this server; payloads, prompts, tool arguments/results, authorization data, and URLs are never persisted |
 | `disabled` | Keep the server visible in config and status, but prevent connections, authentication, tools, and resource calls (only literal `true` disables it) |
 
@@ -96,7 +97,7 @@ Task traffic is dispatched on a dedicated raw channel below the SDK client (the 
 
 One trade-off while tasks are active: every `tools/call` on that connection is dispatched through the task-aware path instead of `Client.callTool`, so the SDK's client-side output-schema validation of `structuredContent` and SEP-2243 `Mcp-Param-*` header mirroring do not run for those calls. Servers still validate their own results; only the client-side double-check is skipped.
 
-The stable SDK handles era-specific request envelopes, result decoding, list-changed subscriptions, cancellation, and multi-round-trip sampling/elicitation. The SDK's embedded-input progress callback does not expose the originating tool or resource identity, so the adapter cannot maintain a durable per-tool waiting status row; interactive sessions keep the existing input dialog visible, and proxy calls show request progress when UI is available. The adapter keeps strict OAuth issuer validation in every mode. Adapter-level roots support, standard MCP logging presentation, and configuration/UI for protocol cache hints are not yet implemented.
+The stable SDK handles era-specific request envelopes, result decoding, list-changed subscriptions, cancellation, and multi-round-trip sampling/elicitation. The SDK's embedded-input progress callback does not expose the originating tool or resource identity, so the adapter cannot maintain a durable per-tool waiting status row; interactive sessions keep the existing input dialog visible, and proxy calls show request progress when UI is available. The adapter keeps strict OAuth issuer validation in every mode. It answers `roots/list` with the Pi session directory, the same root Pi's built-in MCP sends. Server log messages (`notifications/message`) are appended to `~/.pi/agent/mcp.log` in the same format as Pi's built-in MCP. Configuration/UI for protocol cache hints is not yet implemented.
 
 ### Stdio environment boundaries
 

@@ -68,8 +68,10 @@ export const KNOWN_SERVER_PRESETS = [
     {
         id: "github",
         name: "GitHub",
-        summary: "Work with GitHub through your Copilot account.",
-        entry: { url: "https://api.githubcopilot.com/mcp", auth: "oauth", protocolVersion: "auto" },
+        summary: "Work with GitHub using your GitHub CLI sign-in. Needs `gh` installed and `gh auth login` done.",
+        // GitHub's OAuth server has no dynamic client registration, so MCP OAuth can't sign in;
+        // the GitHub CLI token works and is read at connect time, never written to config.
+        entry: { url: "https://api.githubcopilot.com/mcp/", auth: "bearer", bearerToken: "!gh auth token", protocolVersion: "auto" },
     },
     {
         id: "chrome-devtools",
@@ -162,6 +164,75 @@ function legacyMcpConfigHasContent(filePath) {
     }
 }
 export function getLegacyMcpMigrationNotices(cwd = process.cwd(), overridePath) {
+    return [
+        ...getPiMcpConfigNotices(cwd, overridePath),
+        ...getOpenCodeImportNotices(cwd, overridePath),
+        ...getDroppedCredentialNotices(cwd, overridePath),
+    ];
+}
+function credentialFiles(servers, fileOf) {
+    return new Map(Object.entries(servers).map(([name, definition]) => [
+        name,
+        new Map(CREDENTIAL_FIELDS.filter((field) => definition[field] !== undefined).map((field) => [field, fileOf(name, field)])),
+    ]));
+}
+/**
+ * Replays the server merges of loadMcpConfigWithSources with the file behind each credential field,
+ * and reports the fields mergeServerMaps drops because a later file points the server at another url.
+ */
+function getDroppedCredentialNotices(cwd, overridePath) {
+    const notices = [];
+    const merge = (base, baseFiles, next, nextFiles, urlFile) => {
+        const files = new Map(baseFiles);
+        for (const [name, definition] of Object.entries(next)) {
+            const existing = base[name];
+            const fieldFiles = new Map(files.get(name));
+            const byFile = new Map();
+            for (const field of existing ? droppedUrlBoundAuth(existing, definition) : []) {
+                const from = fieldFiles.get(field);
+                if (from !== undefined)
+                    byFile.set(from, [...byFile.get(from) ?? [], field]);
+                fieldFiles.delete(field);
+            }
+            for (const [from, fields] of byFile) {
+                notices.push(`"${name}": ignoring ${fields.join(", ")} from ${from}, because ${urlFile(name)} sets a different url for this server. Use one url, or set ${fields.length === 1 ? "it" : "them"} next to that url.`);
+            }
+            for (const [field, path] of nextFiles.get(name) ?? [])
+                fieldFiles.set(field, path);
+            files.set(name, fieldFiles);
+        }
+        return [mergeServerMaps(base, next), files];
+    };
+    const host = !isExclusiveConfigMode() && getConfiguredHostConfigDiscovery(overridePath, cwd) === "on"
+        ? loadDiscoveredHostConfigs(cwd)
+        : { config: { mcpServers: {} }, serverSources: new Map() };
+    const hostFile = (name) => host.serverSources.get(name)?.path ?? "a host config";
+    let servers = host.config.mcpServers;
+    let files = credentialFiles(servers, hostFile);
+    const sourceSpecs = getConfigSources(overridePath, cwd);
+    const piProjectSource = sourceSpecs.find((source) => source.id === "pi-mcp-project");
+    const piProjectNames = Object.keys((piProjectSource && readPiMcpConfig(piProjectSource.readPath))?.mcpServers ?? {});
+    for (const source of sourceSpecs) {
+        const loaded = readSourceConfig(source.id, source.readPath);
+        if (!loaded)
+            continue;
+        if (source.id === "pi-mcp-global") {
+            for (const name of piProjectNames)
+                delete loaded.mcpServers[name];
+        }
+        // The same two merges as expandImports and mergeConfigs: the file's own entries over its imports,
+        // then the file over the files before it.
+        const imported = expandImports({ ...loaded, mcpServers: {} }, cwd);
+        // An OpenCode project entry can inherit a credential from the global file, so name the file per key.
+        const importFile = (name, field) => imported.keySources?.get(name)?.get(field) ?? imported.serverSources.get(name)?.path ?? source.readPath;
+        const ownFile = () => source.readPath;
+        const [fileServers, fileFiles] = merge(imported.config.mcpServers, credentialFiles(imported.config.mcpServers, importFile), loaded.mcpServers, credentialFiles(loaded.mcpServers, ownFile), ownFile);
+        const urlFile = (name) => typeof loaded.mcpServers[name]?.url === "string" ? source.readPath : importFile(name, "url");
+        [servers, files] = merge(servers, files, fileServers, fileFiles, urlFile);
+    }
+    return notices;
+}
+function getPiMcpConfigNotices(cwd, overridePath) {
     if (piMcpConfigEnabled) {
         return getConfigSources(overridePath, cwd).flatMap((source) => {
             const file = isPiMcpSource(source.id) ? readPiMcpConfig(source.readPath) : null;
@@ -194,6 +265,32 @@ export function getLegacyMcpMigrationNotices(cwd = process.cwd(), overridePath) 
             ? `Merge ${source} into ${target}, then remove ${source}.`
             : `Move it with: mv ${JSON.stringify(source)} ${JSON.stringify(target)}`;
         return [`pi-mcp-adapter no longer reads ${source}. ${fix}`];
+    });
+}
+/** Settings OpenCode drops from an active `opencode` import, grouped by the file that defines each server. */
+function getOpenCodeImportNotices(cwd, overridePath) {
+    const active = (!isExclusiveConfigMode() && getConfiguredHostConfigDiscovery(overridePath, cwd) === "on")
+        || getConfigSources(overridePath, cwd).some((source) => readSourceConfig(source.id, source.readPath)?.imports?.includes("opencode"));
+    const imported = active ? loadImportedConfig("opencode", cwd, "Failed to inspect imported MCP config from opencode:") : null;
+    if (!imported)
+        return [];
+    // Warn only where the OpenCode import is still the server's definition, matching /mcp-adapter.
+    const provenance = getServerProvenance(overridePath, cwd);
+    // Name the file each key came from: a project entry can inherit a stray key from the global file.
+    const byFile = new Map();
+    for (const [name, keys] of getOpenCodeIgnoredSettings(imported.value)) {
+        if (provenance.get(name)?.ignoredSettingsSource !== "opencode")
+            continue;
+        for (const key of keys) {
+            const path = imported.keySources?.get(name)?.get(key) ?? imported.path;
+            const servers = byFile.get(path) ?? new Map();
+            servers.set(name, [...servers.get(name) ?? [], key]);
+            byFile.set(path, servers);
+        }
+    }
+    return [...byFile].map(([path, servers]) => {
+        const ignored = [...servers].map(([name, settings]) => `"${name}": ${settings.join(", ")}`);
+        return `${path}: OpenCode ignores these settings, so the import does too (details in /mcp-adapter): ${ignored.join("; ")}.`;
     });
 }
 export function getSharedConfigPath(target, cwd = process.cwd()) {
@@ -750,6 +847,21 @@ function mergeConfigs(base, next) {
 // otherwise the original endpoint's credentials would be shipped to the new
 // url. See the SECURITY note in mergeServerMaps.
 const URL_BOUND_AUTH_FIELDS = ["headers", "bearerToken", "bearerTokenEnv", "bearerTokenStore", "requestHeadersCommand", "caFile"];
+const CREDENTIAL_FIELDS = [...URL_BOUND_AUTH_FIELDS, "auth", "oauth"];
+/** The credential fields of `existing` that mergeServerMaps drops for `definition`'s different url. */
+function droppedUrlBoundAuth(existing, definition) {
+    if (typeof definition.url !== "string" || definition.url === existing.url)
+        return [];
+    return CREDENTIAL_FIELDS.filter((field) => {
+        if (Object.hasOwn(definition, field))
+            return false;
+        if (field === "auth")
+            return typeof existing.auth === "object";
+        if (field === "oauth")
+            return existing.oauth !== undefined && existing.oauth !== false;
+        return existing[field] !== undefined;
+    });
+}
 function mergeServerMaps(base, next) {
     const merged = { ...base };
     for (const [name, definition] of Object.entries(next)) {
@@ -795,14 +907,10 @@ function mergeServerMaps(base, next) {
         if (existing && typeof definition.url === "string" && definition.url !== existing.url) {
             if (baseEntry === existing)
                 baseEntry = { ...existing };
-            for (const field of URL_BOUND_AUTH_FIELDS) {
+            // Provider tokens (object `auth`) and OAuth config are bound to the url too; the startup
+            // notice reports exactly these fields, so both read the one rule.
+            for (const field of droppedUrlBoundAuth(existing, definition)) {
                 delete baseEntry[field];
-            }
-            // A provider token is bound to the url that asked for it, like the fields above.
-            if (typeof baseEntry.auth === "object")
-                delete baseEntry.auth;
-            if (baseEntry.oauth !== false) {
-                delete baseEntry.oauth;
             }
         }
         if (existing && Object.hasOwn(definition, "env") && isBuiltInAgentPlugin(existing, "env") && !Object.hasOwn(definition, "literalEnv")) {
@@ -825,6 +933,7 @@ function expandImports(config, cwd = process.cwd()) {
         return { config, serverSources: new Map() };
     const importedServers = {};
     const serverSources = new Map();
+    const keySources = new Map();
     for (const importKind of config.imports) {
         const imported = loadImportedConfig(importKind, cwd, `Failed to import MCP config from ${importKind}:`);
         if (!imported)
@@ -834,6 +943,9 @@ function expandImports(config, cwd = process.cwd()) {
             if (!importedServers[name]) {
                 importedServers[name] = definition;
                 serverSources.set(name, imported.serverSources.get(name) ?? imported.source);
+                const keys = imported.keySources?.get(name);
+                if (keys)
+                    keySources.set(name, keys);
             }
         }
     }
@@ -845,6 +957,7 @@ function expandImports(config, cwd = process.cwd()) {
             mcpServers: mergeServerMaps(importedServers, config.mcpServers),
         },
         serverSources,
+        keySources,
     };
 }
 function resolveImportCandidates(importKind, cwd) {
@@ -886,6 +999,7 @@ function loadImportedConfig(importKind, cwd, warningPrefix) {
         let merged = {};
         let highestPrecedenceSource;
         const serverSources = new Map();
+        const keySources = new Map();
         for (const source of resolveImportCandidates(importKind, cwd)) {
             const { path } = source;
             if (!existsSync(path))
@@ -900,8 +1014,14 @@ function loadImportedConfig(importKind, cwd, warningPrefix) {
                     const entries = isRecord(mcp.servers)
                         ? { ...Object.fromEntries(Object.entries(mcp).filter(([name]) => name !== "servers" && name !== "timeout")), ...mcp.servers }
                         : mcp;
-                    const normalized = Object.fromEntries(Object.entries(entries).map(([name, entry]) => {
-                        if (!isRecord(entry) || !isRecord(entry.oauth))
+                    const normalized = Object.fromEntries(Object.entries(entries).map(([name, raw]) => {
+                        if (!isRecord(raw))
+                            return [name, raw];
+                        // OpenCode reads only `environment`; the import also accepts the common `env` spelling.
+                        // `environment` wins when both are set, since that is what OpenCode runs.
+                        const { env, ...rest } = raw;
+                        const entry = env !== undefined && rest.environment === undefined ? { ...rest, environment: env } : rest;
+                        if (!isRecord(entry.oauth))
                             return [name, entry];
                         const { client_id, client_secret, auth_server_metadata_url, ...oauth } = entry.oauth;
                         return [name, {
@@ -915,8 +1035,15 @@ function loadImportedConfig(importKind, cwd, warningPrefix) {
                             }];
                     }));
                     merged = mergeOpenCodeConfigs(merged, { ...imported, mcp: normalized });
-                    for (const name of Object.keys(normalized))
+                    for (const [name, entry] of Object.entries(normalized)) {
                         serverSources.set(name, source);
+                        if (!isRecord(entry))
+                            continue;
+                        const keys = keySources.get(name) ?? new Map();
+                        for (const key of Object.keys(entry))
+                            keys.set(key, path);
+                        keySources.set(name, keys);
+                    }
                     highestPrecedenceSource = source;
                 }
             }
@@ -936,6 +1063,7 @@ function loadImportedConfig(importKind, cwd, warningPrefix) {
             value: merged,
             source: highestPrecedenceSource,
             serverSources,
+            keySources,
         };
     }
     for (const source of resolveImportCandidates(importKind, cwd)) {
@@ -1230,6 +1358,24 @@ function isRecord(value) {
 }
 function isStringRecord(value) {
     return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+// OpenCode's schema allows only these keys on a server (V1 and V2 forms) and silently drops the rest.
+const OPENCODE_LOCAL_SERVER_KEYS = new Set(["type", "command", "cwd", "environment", "enabled", "disabled", "codemode", "timeout", "protocol"]);
+const OPENCODE_REMOTE_SERVER_KEYS = new Set(["type", "url", "headers", "oauth", "enabled", "disabled", "codemode", "timeout", "protocol"]);
+/** Keys of imported OpenCode servers that OpenCode ignores, so the import ignores them too. */
+function getOpenCodeIgnoredSettings(merged) {
+    const ignored = new Map();
+    const entries = isRecord(merged) && isRecord(merged.mcp) ? merged.mcp : {};
+    for (const name of Object.keys(extractServers(merged, "opencode"))) {
+        const entry = entries[name];
+        if (!isRecord(entry) || (entry.type !== "local" && entry.type !== "remote"))
+            continue;
+        const allowed = entry.type === "local" ? OPENCODE_LOCAL_SERVER_KEYS : OPENCODE_REMOTE_SERVER_KEYS;
+        const keys = Object.keys(entry).filter((key) => !allowed.has(key));
+        if (keys.length > 0)
+            ignored.set(name, keys);
+    }
+    return ignored;
 }
 function mergeOpenCodeConfigs(base, next) {
     const baseMcp = base.mcp;
@@ -1728,16 +1874,22 @@ export function writeSharedServerEntry(filePath, serverName, entry) {
 export function getServerProvenance(overridePath, cwd = process.cwd()) {
     const provenance = new Map();
     const userPath = getPiGlobalConfigPath(overridePath);
+    const importProvenance = (importKind, value) => {
+        const ignored = importKind === "opencode" ? getOpenCodeIgnoredSettings(value) : new Map();
+        return new Map(Object.keys(extractServers(value, importKind)).map((name) => {
+            const ignoredSettings = ignored.get(name);
+            // Keep writes inside adapter-owned storage even though the source is external.
+            return [name, { path: userPath, kind: "import", importKind, ...(ignoredSettings ? { ignoredSettings, ignoredSettingsSource: "opencode" } : {}) }];
+        }));
+    };
     if (getConfiguredHostConfigDiscovery(overridePath, cwd) === "on") {
         for (const importKind of Object.keys(IMPORT_PATHS)) {
             const imported = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
             if (!imported)
                 continue;
-            for (const name of Object.keys(extractServers(imported.value, importKind))) {
-                // Keep writes inside adapter-owned storage even though the source is external.
-                // Later import kinds win in the same deterministic order as loadDiscoveredHostConfigs.
-                provenance.set(name, { path: userPath, kind: "import", importKind });
-            }
+            // Later import kinds win in the same deterministic order as loadDiscoveredHostConfigs.
+            for (const [name, prov] of importProvenance(importKind, imported.value))
+                provenance.set(name, prov);
         }
     }
     for (const source of getConfigSources(overridePath, cwd)) {
@@ -1745,21 +1897,28 @@ export function getServerProvenance(overridePath, cwd = process.cwd()) {
         if (!loaded)
             continue;
         if (loaded.imports?.length) {
+            // Same precedence as expandImports + mergeConfigs: the first import in a file wins, and a later file replaces earlier ones.
+            const imported = new Set();
             for (const importKind of loaded.imports) {
-                const imported = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
-                if (!imported)
+                const importedConfig = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
+                if (!importedConfig)
                     continue;
-                const servers = extractServers(imported.value, importKind);
-                for (const name of Object.keys(servers)) {
-                    if (!provenance.has(name)) {
-                        provenance.set(name, { path: userPath, kind: "import", importKind });
-                    }
+                for (const [name, prov] of importProvenance(importKind, importedConfig.value)) {
+                    if (imported.has(name))
+                        continue;
+                    imported.add(name);
+                    provenance.set(name, prov);
                 }
             }
         }
         for (const name of Object.keys(loaded.mcpServers)) {
             // A Pi entry brings its own list; other sources keep the one from the Pi entry below them.
-            const ignoredSettings = loaded.ignoredSettings ? loaded.ignoredSettings.get(name) : provenance.get(name)?.ignoredSettings;
+            // A source that defines the server replaces an OpenCode import, so its OpenCode list no longer applies.
+            // (`loaded.mcpServers` holds only the file's own servers, so a plain import keeps its list.)
+            const below = provenance.get(name);
+            const ignoredSettings = loaded.ignoredSettings
+                ? loaded.ignoredSettings.get(name)
+                : below?.ignoredSettingsSource === "opencode" ? undefined : below?.ignoredSettings;
             provenance.set(name, {
                 path: source.writePath,
                 kind: source.kind,

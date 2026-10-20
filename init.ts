@@ -117,9 +117,13 @@ export async function initializeMcp(
 ): Promise<McpExtensionState> {
   // Pi guards ExtensionContext getters after reload. Snapshot all values that
   // can be used by asynchronous work before the first await.
-  const configPath = options.config === undefined
-    ? options.configPath ?? (pi.getFlag("mcp-config") as string | undefined)
-    : undefined;
+  const configPath = options.config !== undefined
+    ? undefined
+    : options.configPath ?? (pi.getFlag("mcp-config") as string | undefined);
+  const projectServersFlag = options.config !== undefined ? undefined : pi.getFlag("mcp-project-servers");
+  if (projectServersFlag !== undefined && projectServersFlag !== "allow") {
+    console.warn(`Ignoring --mcp-project-servers ${JSON.stringify(projectServersFlag)}; the only accepted value is "allow"`);
+  }
   const cwd = ctx.cwd;
   const hasUI = ctx.hasUI;
   const mode = ctx.mode;
@@ -147,7 +151,7 @@ export async function initializeMcp(
     ? { config: resolveConfiguredClaudePluginMcp(cloneMcpConfig(options.config), cwd), blockedServers: new Map() }
     : options.excludeProjectServers
       ? { config: excludeProjectServersAtLoadTime(loadMcpConfig(configPath, cwd)), blockedServers: new Map() }
-      : await applyProjectServerTrustToConfig(loadMcpConfig(configPath, cwd), ctx);
+      : await applyProjectServerTrustToConfig(loadMcpConfig(configPath, cwd), ctx, { allowUnapproved: projectServersFlag === "allow" });
   const startupAutoAuth = trustResult.config.settings?.autoAuth === true && hasUI && mode === "tui";
   // Keep session_start waiting while pairing owns the editor, just as for trust dialogs.
   if (!startupAutoAuth) options.onProjectTrustResolved?.();
@@ -204,6 +208,7 @@ export async function initializeMcp(
       ...(ui === undefined ? {} : { ui }),
       modelRegistry,
       getCurrentModel: () => owner.isActive() ? ctx.model : undefined,
+      getThinkingLevel: () => owner.isActive() ? pi.getThinkingLevel() : "off",
       getSignal: () => owner.isActive()
         ? combineAbortSignals(owner.signal, ctx.signal)
         : owner.signal,

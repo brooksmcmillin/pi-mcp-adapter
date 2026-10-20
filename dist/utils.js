@@ -160,6 +160,42 @@ export function interpolateEnvRecord(values, environment = process.env) {
 }
 const COMMAND_SECRET_TIMEOUT_MS = 10_000;
 const COMMAND_SECRET_MAX_OUTPUT_BYTES = 1024 * 1024;
+let windowsCommandBash;
+function isLegacyWslBash(path) {
+    return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(path.replace(/\//g, "\\").toLowerCase());
+}
+function findWindowsBash() {
+    const installs = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
+        .filter((dir) => Boolean(dir))
+        .map(dir => `${dir}\\Git\\bin\\bash.exe`);
+    const found = installs.find(path => existsSync(path));
+    if (found)
+        return found;
+    try {
+        const result = spawnSync("where", ["bash.exe"], { encoding: "utf8", timeout: 5000, windowsHide: true });
+        if (result.status !== 0 || !result.stdout)
+            return null;
+        return result.stdout.split(/\r?\n/)
+            .map(line => line.trim())
+            .find(path => path && !isLegacyWslBash(path) && existsSync(path)) ?? null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * On Windows, the bash used to run `!command` values: Git Bash in its standard
+ * install locations, then bash.exe on PATH (skipping the legacy WSL launcher),
+ * as Pi does. Undefined elsewhere or when none is found, so callers keep the
+ * platform default shell.
+ */
+export function getWindowsCommandBash() {
+    if (process.platform !== "win32")
+        return undefined;
+    if (windowsCommandBash === undefined)
+        windowsCommandBash = findWindowsBash();
+    return windowsCommandBash ?? undefined;
+}
 export function resolveCommandSecret(value, context) {
     if (value === undefined)
         return undefined;
@@ -167,14 +203,17 @@ export function resolveCommandSecret(value, context) {
         return interpolateEnvVars(value.slice(1));
     if (!value.startsWith("!"))
         return interpolateEnvVars(value);
-    const result = spawnSync(value.slice(1), {
-        shell: true,
+    const options = {
         encoding: "utf8",
         timeout: COMMAND_SECRET_TIMEOUT_MS,
         maxBuffer: COMMAND_SECRET_MAX_OUTPUT_BYTES,
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
-    });
+    };
+    const bash = getWindowsCommandBash();
+    const result = bash === undefined
+        ? spawnSync(value.slice(1), { ...options, shell: true })
+        : spawnSync(bash, ["-c", value.slice(1)], { ...options, shell: false });
     if (result.error) {
         const code = result.error.code;
         const reason = code === "ETIMEDOUT"

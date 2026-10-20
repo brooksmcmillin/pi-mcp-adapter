@@ -673,6 +673,31 @@ describe("attachTaskSession", () => {
     }
   });
 
+  it("answers a task-time roots request with the session roots", async () => {
+    const roots = [{ uri: "file:///work/project", name: "project" }];
+    const { client, transport, server } = fakeModernTaskStack({
+      statuses: [
+        { status: "input_required", inputRequests: { where: { method: "roots/list", params: {} } } },
+        { status: "completed", result: { resultType: "complete", content: [], isError: false } },
+      ],
+    });
+    const attachment = await attachTaskSession({
+      client,
+      serverName: "task-server",
+      definition,
+      transport,
+      clientInfo,
+      clientCapabilities: { roots: {} },
+      roots,
+    });
+    try {
+      await callToolViaTaskSession(attachment!.session, { name: "scan", args: {} });
+      expect(server.updates[0]).toMatchObject({ inputResponses: { where: { roots } } });
+    } finally {
+      await attachment!.session.close();
+    }
+  });
+
   it("surfaces a failed task as a typed ProtocolError", async () => {
     const { client, transport } = fakeModernTaskStack({
       statuses: [

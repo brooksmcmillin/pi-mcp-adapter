@@ -31,7 +31,9 @@ Tool names are fuzzy-matched on hyphens and underscores — `context7_resolve_li
 
 When a server declares MCP tool annotations, `describe` adds a `Hints:` line such as `Hints: read-only, idempotent`, `tools.describe` in `mcpScript` returns them as `annotations`, and the approval prompt says when a tool is marked destructive or read-only. They are the server's own hints, not guarantees, and never appear in search results or direct-tool descriptions.
 
-When `includeSchemas` is enabled, search and describe render common JSON Schema parameters as compact TypeScript shapes like `{ query: string; limit?: number; }`, with the older schema formatter retained as a fallback for unsupported schemas.
+With `includeSchemas` enabled, search renders parameter summaries, using compact TypeScript shapes where possible. When the summary leaves something out, because compact rendering is unsupported or the schema carries field guidance, constraints or other non-structural information, it links to `mcp({ describe: "tool_name", server: "name" })`. That description returns the original input JSON Schema, including referenced definitions, integer requirements, bounds and annotations. References are preserved, not expanded or fetched; an external reference still requires its external schema. Plain structural schemas keep compact shapes like `{ query: string; enabled?: boolean; }`.
+
+`describe` results use the existing output guard: oversized descriptions are bounded in context and the complete text, including the schema, is saved to the indicated file. The existing `settings.outputGuard` limits and opt-out apply; no extra setting or direct-tool exposure is required.
 
 `mcp({ server: "name" })` lists each tool's top-level parameter names after its name, required ones first, such as `- search(query, limit?) - ...`. Types and nested fields stay in `describe`. A tool whose schema has no properties shows `()`. A tool with no schema, or one whose top level uses `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else`, or dependent requirements, shows no parentheses, because those can add parameters or requirements the list would miss.
 
