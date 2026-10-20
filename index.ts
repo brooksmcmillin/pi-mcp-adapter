@@ -13,7 +13,7 @@ import { cloneMcpConfig, discoverConfiguredClaudePluginSkills, getLegacyMcpMigra
 import { approveProjectServer, excludeProjectServersAtLoadTime, hasProjectServerDefinitions } from "./project-server-trust.ts";
 import { buildProxyDescription, getLargeDirectToolsAdvisory, getMissingConfiguredDirectToolServers, prepareDirectToolArguments, resolveDirectTools } from "./direct-tool-surface.ts";
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
-import { computeServerHash, isServerCacheValid, loadMetadataCache, parseDirectToolSelectors, type MetadataCache } from "./metadata-cache.ts";
+import { isServerCacheValid, loadMetadataCache, parseDirectToolSelectors, withSessionMetadata, type MetadataCache } from "./metadata-cache.ts";
 import { createPromptCommand, resolveCachedPrompts } from "./prompts.ts";
 import { logger } from "./logger.ts";
 import { formatMcpFooterStatus, formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
@@ -687,26 +687,11 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     }
   }
 
-  function loadToolSurfaceCache(config: McpConfig): MetadataCache | null {
-    const cache = loadMetadataCache();
-    const currentState = state;
-    if (!currentState?.sessionMetadata?.size) return cache;
-    const servers = { ...cache?.servers };
-    for (const [serverName, entry] of currentState.sessionMetadata) {
-      const definition = config.mcpServers[serverName];
-      if (!definition || isServerDisabled(definition)) continue;
-      if (entry.configHash !== computeServerHash(definition)) continue;
-      const { ttlMs: _sessionTtl, cacheScope: _sessionScope, ...sessionEntry } = entry;
-      servers[serverName] = { ...sessionEntry, cachedAt: Date.now() };
-    }
-    return { version: 1, servers };
-  }
-
   function syncToolSurface(ctx?: ExtensionContext): void {
     const notificationGeneration = lifecycleGeneration;
     const notificationOwner = currentOwner;
     const config = state?.config ?? earlyConfig;
-    const cache = loadToolSurfaceCache(config);
+    const cache = withSessionMetadata(loadMetadataCache(), config, state?.sessionMetadata);
     const result = syncDirectTools(config, cache);
     if (state) {
       const directToolCounts = state.directToolCounts ?? new Map<string, number>();
@@ -1070,6 +1055,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     description: "Path to MCP config file",
     type: "string",
   });
+  pi.registerFlag("mcp-project-servers", {
+    description: "Set to \"allow\" to start unapproved project MCP servers in a trusted project without asking, for this process only",
+    type: "string",
+  });
 
   function startInitialization(
     ctx: ExtensionContext,
@@ -1196,7 +1185,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         guard();
         if (earlyConfig.settings?.freezeDirectTools === true) {
           directToolsFrozen = true;
-          logger.info("MCP: direct tools frozen after initial sync — metadata can refresh without rebuilding the active tool surface");
+          // Routine initialization must not write over Pi's interactive editor.
+          logger.debug("MCP: direct tools frozen after initial sync — metadata can refresh without rebuilding the active tool surface");
         }
         guard();
         initPromise = null;
@@ -2279,7 +2269,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           return connectAndReport(proxyState, params.connect, signal, _ctx as ExtensionContext);
         }
         if (params.describe) {
-          return proxyModes.executeDescribe(proxyState, params.describe, params.server);
+          const result = await proxyModes.executeGuardedDescribe(proxyState, params.describe, params.server);
+          assertRuntimeGuard(proxyGuard);
+          return result;
         }
         if (params.instructions) {
           return proxyModes.executeInstructions(proxyState, params.instructions);

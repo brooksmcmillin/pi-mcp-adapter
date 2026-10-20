@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pi --mcp-project-servers allow` starts a trusted project's MCP servers without the approval prompt, for that process only. Scripts that open interactive Pi sessions in new git worktrees no longer stall on a prompt nobody sees when a branch changes `.mcp.json`. Untrusted projects stay blocked, and a hand-typed `pi` still asks. Thanks to [@woksin](https://github.com/woksin) for [#852](https://github.com/nicobailon/pi-mcp-adapter/issues/852).
+- MCP servers that ask for roots now get the Pi session directory, as they do with Pi's built-in MCP. Servers that scope their work to the client's workspace, such as file and code-search servers, now see the project you're in. The official filesystem server replaces the directories in its args with these roots; set `"roots": false` on its entry to keep them.
+- Log messages MCP servers send are now appended to `~/.pi/agent/mcp.log`, the file and format Pi's built-in MCP uses, so a remote server that misbehaves leaves a trail. Before, they were dropped. The file moves to `mcp.log.1` past 5 MB. Nothing is added to the model's context.
+
+### Fixed
+
+- With `settings.freezeDirectTools` on, the "direct tools frozen after initial sync" message no longer prints over Pi's input editor when MCP starts, which could look like text you never typed. It now shows only with `MCP_UI_DEBUG=1`. Thanks to [@VoidInTheShell](https://github.com/VoidInTheShell) for [#858](https://github.com/nicobailon/pi-mcp-adapter/pull/858).
+
+## [5.3.2] - 2026-10-17
+
+### Highlights
+
+- The GitHub preset in `/mcp-adapter setup` now signs in with your GitHub CLI login, so connecting to GitHub works.
+- Saving direct tools in the MCP panel no longer brings back the "Allow project MCP server?" prompt for a server you already allowed.
+- The MCP panel shows a connected server's tools and your saved direct tools, even for servers like GitHub that don't let their tool list be cached.
+- MCP sampling uses your Pi thinking level, so servers that sample through a reasoning-only model stop failing.
+
+### Fixed
+
+- The GitHub preset in `/mcp-adapter setup` now signs in with your GitHub CLI login (`gh auth token`). Before, it used MCP OAuth, which GitHub doesn't offer to apps it hasn't registered, so `/mcp-auth github` always failed with "does not support dynamic client registration". Install `gh` and run `gh auth login` first. If you added the old preset, remove its `github` entry and add GitHub again from `/mcp-adapter setup`. Thanks to [@Milor123](https://github.com/Milor123) for [#841](https://github.com/nicobailon/pi-mcp-adapter/issues/841).
+- When one config file gives a server a different `url` than another file that set its headers or token, the adapter still leaves those credentials out so they aren't sent to the new address, but it now tells you at startup which server, which settings and which two files are involved. Before, the credentials disappeared silently and the server failed with sign-in errors. Thanks to [@Milor123](https://github.com/Milor123) for [#841](https://github.com/nicobailon/pi-mcp-adapter/issues/841).
+- The MCP panel now lists the tools of a server you already connected to in this session, with your saved direct tools checked, even when the server doesn't let its tool list be cached, as with GitHub. Before, such a server showed "(not cached)" with no tools every time you opened the panel, so direct tools you had saved looked lost. Thanks to [@Milor123](https://github.com/Milor123) for [#841](https://github.com/nicobailon/pi-mcp-adapter/issues/841).
+- Saving direct tools in the MCP panel for a project server you already allowed no longer makes Pi ask "Allow project MCP server?" again on the next start or `/reload`. Saving used to change the server's config in a way that cancelled your approval. A server you didn't allow still asks, and so does any other change to the server's config. Thanks to [@Milor123](https://github.com/Milor123) for [#841](https://github.com/nicobailon/pi-mcp-adapter/issues/841).
+- Approving a project MCP server now sticks when Pi is started from the same folder spelled with different capitalization, such as `C:\Users\Me` and `c:\users\me` on Windows. Before, each spelling counted as a separate project and asked "Allow project MCP server?" again. An approval saved under a differently capitalized spelling asks once more after this update. Thanks to [@Milor123](https://github.com/Milor123) for [#841](https://github.com/nicobailon/pi-mcp-adapter/issues/841).
+- MCP sampling requests now use your current Pi thinking level, so a server that samples through a model that requires reasoning no longer fails with "Reasoning is mandatory for this endpoint and cannot be disabled". Before, sampling always ran with thinking off. On Pi 0.84 and 0.85 sampling still runs with thinking off. Thanks to [@bardic](https://github.com/bardic) for [#846](https://github.com/nicobailon/pi-mcp-adapter/issues/846).
+
+## [5.3.1] - 2026-10-15
+
+### Highlights
+
+- On Windows, `!command` secrets now run with Git Bash when it is installed, so commands like `!$HOME/bin/get-token` work.
+- `"openUi": false` really runs a server's tools without UI, instead of leaving them waiting on a window that never opens.
+- `describe` no longer hides tool input details such as descriptions, limits and integer types behind a short summary.
+- The MCP panel keeps your saved direct tools selected after a ctrl+r reconnect.
+- OpenCode imports accept `env` for server variables and tell you about settings OpenCode ignores.
+
+### Fixed
+
+- `describe` in the `mcp` tool now shows a tool's full input schema whenever the short summary would leave something out, such as field descriptions, integer types, minimum and maximum values, or shared definitions. Simple schemas still get the short summary. When search shortens a parameter's description, it points you to `describe` for the full text, and very long descriptions are saved to a file instead of being cut off. Thanks to [@chpock](https://github.com/chpock) for [#833](https://github.com/nicobailon/pi-mcp-adapter/pull/833) and [#834](https://github.com/nicobailon/pi-mcp-adapter/pull/834).
+- After you reconnect a server in the MCP panel with ctrl+r, the tools you had saved as direct tools now show as selected, so toggling one tool and saving no longer drops the rest of your selection. Thanks to [@Milor123](https://github.com/Milor123) for [#829](https://github.com/nicobailon/pi-mcp-adapter/issues/829).
+- `"openUi": false` now runs a server's tools without UI instead of only hiding the window. The adapter no longer tells that server it supports MCP Apps, so a server that checks for MCP Apps support runs its tools and returns the result rather than waiting on a form that never opens. Turning it on or off makes the adapter fetch that server's tool list again. Thanks to [@nicolasgarciac](https://github.com/nicolasgarciac) for [#827](https://github.com/nicobailon/pi-mcp-adapter/issues/827).
+- The OpenCode import now accepts `env` as another name for `environment` on a server, so servers configured with `env` get their variables in Pi instead of failing with "Connection closed". When both are set, `environment` wins. OpenCode itself still reads only `environment`. Other settings outside OpenCode's schema are reported at startup, in `/mcp-adapter` and in `pi-mcp-adapter doctor`. Thanks to [@cbaudino](https://github.com/cbaudino) and [@syf2211](https://github.com/syf2211) for [#828](https://github.com/nicobailon/pi-mcp-adapter/issues/828) and [#830](https://github.com/nicobailon/pi-mcp-adapter/pull/830).
+- On Windows, `!command` values for `headers`, `bearerToken`, `oauth.clientSecret` and stdio `env` now run with Git Bash when it is installed, like Pi does, so commands written with POSIX syntax such as `$HOME` work instead of failing in cmd.exe. Without Git Bash they still run in cmd.exe. If Git Bash is installed and a command uses cmd.exe syntax such as `%MY_SECRET%`, rewrite it in POSIX syntax (`$MY_SECRET`). Thanks to [@estrizhok](https://github.com/estrizhok) for [#840](https://github.com/nicobailon/pi-mcp-adapter/issues/840).
+
 ## [5.3.0] - 2026-10-12
 
 ### Highlights
@@ -119,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/mcp-adapter setup` adds Figma (desktop) to the global config instead of writing `.mcp.json` into whatever project you opened setup from.
 - `/mcp-adapter setup` warns when a server you add won't be used, because another config file already defines or disables it, or the current config mode doesn't read the file it was written to.
 - A bearer token or header value that isn't a valid HTTP header value, such as one containing a newline, no longer appears in connection errors. This covers `bearerToken` (including `!command` and `${VAR}` forms), `bearerTokenEnv`, and configured `headers`; the error now names the server and header instead.
+
 ## [4.0.0] - 2026-09-30
 
 ### Highlights

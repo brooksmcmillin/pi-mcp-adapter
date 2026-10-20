@@ -334,8 +334,10 @@ export interface ServerEntry {
      */
     searchKeywords?: Record<string, string[]>;
     approveTools?: boolean | "destructive" | string[];
-    /** Set to false to never open MCP App UIs for this server's tools; results stay inline. */
+    /** Set to false to tell this server the host has no MCP App UI; its tools run and return results inline. */
     openUi?: boolean;
+    /** Set to false to not send this server the session directory as its root. */
+    roots?: boolean;
     debug?: boolean;
     /** Enable metadata-only JSONL protocol tracing for this server. */
     trace?: boolean;
@@ -583,9 +585,13 @@ export interface ServerProvenance {
     path: string;
     kind: "user" | "project" | "import";
     importKind?: string;
-    /** Settings from Pi's `mcp.json` that the adapter could not translate for this server. */
+    /** Settings from Pi's `mcp.json` that the adapter could not translate, or that OpenCode ignores in an imported server. */
     ignoredSettings?: string[];
+    /** Set when `ignoredSettings` came from an imported OpenCode server rather than Pi's `mcp.json`. */
+    ignoredSettingsSource?: "opencode";
 }
+/** The line `/mcp-adapter` and `doctor` show for a server's ignored settings. */
+export declare function describeIgnoredSettings(provenance: ServerProvenance | undefined): string | undefined;
 export interface McpAuthResult {
     ok: boolean;
     message?: string;

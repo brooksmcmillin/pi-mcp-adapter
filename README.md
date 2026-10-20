@@ -27,7 +27,7 @@ Since then, Pi 0.99 added MCP support of its own, which also keeps tool definiti
 - **Sign-in tokens go in your OS keychain** by default (an encrypted file is opt-in), not in a plain JSON file under `~/.pi/agent`.
 - **Adding servers is easier.** Give the agent a server's URL and it installs it and checks its tools in the same session, opening sign-in first if the server needs it, with no shell command or `/reload`. Servers already configured in Cursor, Claude Code, Codex, or VS Code can be imported with `/mcp-adapter setup`, which also adds presets such as Figma and GitHub.
 
-The built-in has two things the adapter doesn't: Pi's permission extensions see each MCP call as its own tool call without changes, and it sends roots (the session directory) to servers. Pi's `codemode` works with both.
+The built-in has one thing the adapter doesn't: Pi's permission extensions see each MCP call as its own tool call without changes. Pi's `codemode` works with both.
 
 | | Pi's built-in MCP | pi-mcp-adapter |
 |---|---|---|

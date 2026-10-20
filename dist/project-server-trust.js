@@ -51,7 +51,8 @@ export function hashProjectServerDefinition(definition) {
 }
 export function canonicalProjectRoot(cwd) {
     try {
-        return realpathSync(cwd);
+        // The native realpath returns the on-disk casing, so `C:\Users\Me` and `c:\users\me` share approvals.
+        return realpathSync.native(cwd);
     }
     catch {
         return resolve(cwd);
@@ -87,9 +88,9 @@ function linkedWorktreeRepoScope(dotGit) {
         const pointer = /^gitdir: (.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
         if (!pointer)
             return undefined;
-        const adminDir = realpathSync(resolve(dirname(dotGit), pointer));
+        const adminDir = realpathSync.native(resolve(dirname(dotGit), pointer));
         const backLink = readFileSync(join(adminDir, "gitdir"), "utf8").trim();
-        if (realpathSync(resolve(adminDir, backLink)) !== realpathSync(dotGit))
+        if (realpathSync.native(resolve(adminDir, backLink)) !== realpathSync.native(dotGit))
             return undefined;
         const commonDir = dirname(dirname(adminDir));
         const bare = /^\s*bare\s*=\s*(true|yes|on|1)\s*$/im.test(readFileSync(join(commonDir, "config"), "utf8"));
@@ -142,6 +143,45 @@ export function approveProjectServer(cwd, serverName, definition) {
         approvedAt: new Date().toISOString(),
     });
 }
+function isApproved(approvals, projectRoot, serverName, definition) {
+    const definitionHash = hashProjectServerDefinition(definition);
+    return approvals.approvals.some(entry => entry.projectRoot === projectRoot && entry.serverName === serverName && entry.definitionHash === definitionHash);
+}
+function isProjectTrusted(ctx) {
+    try {
+        return ctx.isProjectTrusted();
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * After the adapter edits config on the user's behalf (a panel save), re-approve each named project
+ * server whose pre-edit definition was approved, so the edit does not revoke the approval. Only a
+ * `directTools` change carries the approval over; any other difference, such as a concurrent edit to
+ * the file, still needs a new approval. A server without a matching approval stays unapproved: an
+ * adapter edit never creates one.
+ */
+export function keepProjectServerApprovals(ctx, before, after, serverNames) {
+    if (!isProjectTrusted(ctx))
+        return;
+    const projectServers = asLoadedConfig(after).projectServers;
+    const projectRoot = projectApprovalScope(ctx.cwd);
+    const approvals = loadApprovals();
+    for (const name of serverNames) {
+        const previous = before.mcpServers[name];
+        const next = after.mcpServers[name];
+        if (!previous || !next || !projectServers.has(name))
+            continue;
+        if (!isApproved(approvals, projectRoot, name, previous))
+            continue;
+        const { directTools: _previousDirectTools, ...previousRest } = previous;
+        const { directTools: _nextDirectTools, ...nextRest } = next;
+        if (hashProjectServerDefinition(previousRest) !== hashProjectServerDefinition(nextRest))
+            continue;
+        approveProjectServer(ctx.cwd, name, next);
+    }
+}
 function describeServer(definition) {
     if (definition.command) {
         return [definition.command, ...(definition.args ?? [])].map(value => JSON.stringify(value)).join(" ");
@@ -152,29 +192,23 @@ function describeServer(definition) {
         return definition.socket;
     return "(no command or endpoint)";
 }
-export async function applyProjectServerTrust(loaded, ctx) {
+export async function applyProjectServerTrust(loaded, ctx, options = {}) {
     const config = { ...loaded.config, mcpServers: { ...loaded.config.mcpServers } };
     const blockedServers = new Map();
     if (loaded.projectServers.size === 0)
         return { config, blockedServers };
-    let projectTrusted = false;
-    try {
-        projectTrusted = ctx.isProjectTrusted();
-    }
-    catch {
-        projectTrusted = false;
-    }
+    const projectTrusted = isProjectTrusted(ctx);
     // RPC sessions also have a UI, but Pi reads RPC input only after session_start, so a dialog here never resolves.
     const interactive = ctx.hasUI && ctx.mode === "tui";
+    const allowUnapproved = options.allowUnapproved === true || (!interactive && loaded.projectServerPolicy === "allow");
     const projectRoot = projectApprovalScope(ctx.cwd);
     const approvals = loadApprovals();
     for (const [name, source] of loaded.projectServers) {
         const definition = config.mcpServers[name];
         if (!definition || isServerDisabled(definition))
             continue;
-        const definitionHash = hashProjectServerDefinition(definition);
-        const approved = approvals.approvals.some(entry => entry.projectRoot === projectRoot && entry.serverName === name && entry.definitionHash === definitionHash);
-        if (projectTrusted && (approved || (!interactive && loaded.projectServerPolicy === "allow")))
+        const approved = isApproved(approvals, projectRoot, name, definition);
+        if (projectTrusted && (approved || allowUnapproved))
             continue;
         let reason;
         if (!projectTrusted) {
@@ -195,8 +229,8 @@ export async function applyProjectServerTrust(loaded, ctx) {
     }
     return { config, blockedServers };
 }
-export function applyProjectServerTrustToConfig(config, ctx) {
-    return applyProjectServerTrust(asLoadedConfig(config), ctx);
+export function applyProjectServerTrustToConfig(config, ctx, options = {}) {
+    return applyProjectServerTrust(asLoadedConfig(config), ctx, options);
 }
 /** Remove project-derived servers before an ExtensionContext exists. */
 export function excludeProjectServersAtLoadTime(loadedOrConfig) {

@@ -49,7 +49,7 @@ const mocks = vi.hoisted(() => ({
   executeAuthStart: vi.fn(),
   executeCall: vi.fn(),
   executeConnect: vi.fn(),
-  executeDescribe: vi.fn(),
+  executeGuardedDescribe: vi.fn(),
   executeList: vi.fn(),
   executeSearch: vi.fn(),
   executeStatus: vi.fn(),
@@ -158,7 +158,7 @@ vi.mock("../proxy-modes.ts", async () => {
   executeAuthStart: mocks.executeAuthStart,
   executeCall: mocks.executeCall,
   executeConnect: mocks.executeConnect,
-  executeDescribe: mocks.executeDescribe,
+  executeGuardedDescribe: mocks.executeGuardedDescribe,
   executeList: mocks.executeList,
   executeSearch: mocks.executeSearch,
   executeStatus: mocks.executeStatus,
@@ -982,6 +982,37 @@ describe("mcpAdapter session lifecycle", () => {
 
     expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "demo_search" }));
     expect(state.directToolCounts).toEqual(new Map([["demo", 2]]));
+  });
+
+  it.each([false, true])("keeps frozen-tool initialization output debug-only (debug=%s)", async (debug) => {
+    vi.stubEnv("MCP_UI_DEBUG", debug ? "1" : "");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const debugLog = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const config = {
+      settings: { freezeDirectTools: true },
+      mcpServers: { demo: { command: "demo", directTools: true } },
+    };
+    const state = createState();
+    state.config = config;
+    mocks.loadMcpConfig.mockReturnValue(config);
+    mocks.resolveDirectTools.mockReturnValue([directToolSpec]);
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    try {
+      const { api, handlers } = await loadAdapter();
+      await handlers.get("session_start")?.({}, { hasUI: true });
+      await vi.waitFor(() => expect(mocks.updateStatusBar).toHaveBeenCalledWith(state));
+
+      expect(api.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "demo_search" }));
+      expect(log).not.toHaveBeenCalled();
+      if (debug) {
+        expect(debugLog).toHaveBeenCalledWith(expect.stringContaining("direct tools frozen after initial sync"));
+      } else {
+        expect(debugLog).not.toHaveBeenCalled();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("does not refresh frozen direct tools on failure-backoff metadata updates", async () => {
@@ -2349,7 +2380,7 @@ describe("mcpAdapter session lifecycle", () => {
       details: { mode: "describe", server: "codegraph" },
     };
     mocks.initializeMcp.mockResolvedValue(state);
-    mocks.executeDescribe.mockReturnValue(describeResult);
+    mocks.executeGuardedDescribe.mockReturnValue(describeResult);
 
     const { api, handlers } = await loadAdapter();
     await handlers.get("session_start")?.({}, {});
@@ -2362,7 +2393,26 @@ describe("mcpAdapter session lifecycle", () => {
       server: "codegraph",
     })).toBe(describeResult);
 
-    expect(mocks.executeDescribe).toHaveBeenCalledWith(state, "codegraph_explore", "codegraph");
+    expect(mocks.executeGuardedDescribe).toHaveBeenCalledWith(state, "codegraph_explore", "codegraph");
+  });
+
+  it("rejects a pending describe result after the session is replaced", async () => {
+    const state = createState();
+    const describeResult = { content: [{ type: "text", text: "stale description" }], details: { mode: "describe" } };
+    const pendingDescribe = createDeferred<typeof describeResult>();
+    mocks.initializeMcp.mockResolvedValue(state);
+    mocks.executeGuardedDescribe.mockReturnValue(pendingDescribe.promise);
+    const { api, handlers } = await loadAdapter();
+    await handlers.get("session_start")?.({}, {});
+    await Promise.resolve();
+    await Promise.resolve();
+    const execution = registeredTool(api, "mcp").execute("describe-pending", { describe: "demo_search" });
+    await vi.waitFor(() => expect(mocks.executeGuardedDescribe).toHaveBeenCalledOnce());
+
+    await handlers.get("session_start")?.({}, {});
+    pendingDescribe.resolve(describeResult);
+
+    await expect(execution).rejects.toThrow("MCP extension session restarted");
   });
 
   it("forwards native object proxy args into executeCall", async () => {

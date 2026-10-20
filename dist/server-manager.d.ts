@@ -86,7 +86,7 @@ export declare class McpServerManager {
     private traceWriter;
     private providerToken;
     private stopped;
-    /** Default cwd for stdio servers without an explicit config `cwd`. */
+    /** Session cwd: the root sent to servers, and the default cwd for stdio servers without a config `cwd`. */
     constructor(defaultCwd?: string | undefined);
     setSamplingConfig(config: ServerSamplingConfig | undefined): void;
     setMetadataListChangedListener(listener: MetadataListChangedListener | undefined): void;
@@ -141,6 +141,8 @@ export declare class McpServerManager {
     private enrichHttpConnectionError;
     private connectClientWithAbort;
     private buildClientCapabilities;
+    /** The session directory as the server's only root, unless there is no session cwd or the server opted out. */
+    private rootsFor;
     private createClient;
     private handleToolsListChanged;
     private handlePromptsListChanged;

@@ -154,6 +154,25 @@ export function findToolByName(metadata: ToolMetadata[] | undefined, toolName: s
   return metadata.find(m => m.name.replace(/-/g, "_") === normalized);
 }
 
+/** Keep only plain structural schemas compact; preserve everything else as original JSON. */
+export function isPlainTypeSchema(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const s = schema as Record<string, unknown>;
+  if (Object.keys(s).some(key => !["type", "properties", "required", "items"].includes(key))) return false;
+  if (s.type === "integer" || Array.isArray(s.type)) return false;
+
+  const properties = s.properties;
+  if (properties !== undefined) {
+    if (s.type !== "object" || !properties || typeof properties !== "object" || Array.isArray(properties)) return false;
+    if (!Object.values(properties).every(isPlainTypeSchema)) return false;
+  }
+  if (s.required !== undefined) {
+    if (!Array.isArray(s.required) || s.required.some(name => typeof name !== "string" || !Object.hasOwn(properties ?? {}, name))) return false;
+  }
+  if (s.items !== undefined && (s.type !== "array" || !isPlainTypeSchema(s.items))) return false;
+  return true;
+}
+
 /** Whether the schema formatter has field descriptions worth showing beside a compact shape. */
 export function hasSchemaDescriptions(schema: unknown, includeRoot = false): boolean {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;

@@ -42,6 +42,7 @@ import {
   TaskCancelledError,
   TaskFailedError,
   type ApplicationElicitContentValue,
+  type ApplicationRoot,
   type RawClientDispatch,
   type TaskEnabledSession,
 } from "@modelcontextprotocol/ext-tasks/client";
@@ -296,6 +297,8 @@ export interface AttachTaskSessionOptions {
   clientCapabilities: Record<string, unknown>;
   onElicitation?: (request: ElicitRequest, signal?: AbortSignal) => Promise<ElicitResult>;
   onSampling?: (request: CreateMessageRequest, signal?: AbortSignal) => Promise<CreateMessageResult>;
+  /** What a task's roots input request gets; the same list the connection's roots/list handler returns. */
+  roots?: ApplicationRoot[] | undefined;
 }
 
 export interface TaskSessionAttachment {
@@ -355,7 +358,7 @@ export async function attachTaskSession(
         content: result.content as never,
       };
     },
-    roots: async () => ({ roots: [] }),
+    roots: async () => ({ roots: options.roots ?? [] }),
   });
 
   const channel = new RawRequestChannel(options.transport, options.requestTimeoutMs);

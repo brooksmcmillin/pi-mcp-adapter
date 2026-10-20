@@ -530,9 +530,9 @@ async function runDoctor(argv, log, error) {
     error("Usage: pi-mcp-adapter doctor [--json]");
     return 1;
   }
-  let config, trust, manager, auth, authFlow, utils, agentDir;
+  let config, trust, manager, auth, authFlow, utils, agentDir, types;
   try {
-    [config, trust, manager, auth, authFlow, utils, agentDir] = await Promise.all([
+    [config, trust, manager, auth, authFlow, utils, agentDir, types] = await Promise.all([
       import("./dist/config.js"),
       import("./dist/project-server-trust.js"),
       import("./dist/server-manager.js"),
@@ -540,6 +540,7 @@ async function runDoctor(argv, log, error) {
       import("./dist/mcp-auth-flow.js"),
       import("./dist/utils.js"),
       import("./dist/agent-dir.js"),
+      import("./dist/types.js"),
     ]);
   } catch (err) {
     error("Unable to load doctor command modules.");
@@ -557,6 +558,7 @@ async function runDoctor(argv, log, error) {
     error("Pi 0.99 or later wasn't found on PATH, so Pi's own mcp.json files were not checked.");
   }
   const loaded = config.loadMcpConfigWithSources(undefined, cwd);
+  const provenance = config.getServerProvenance(undefined, cwd);
   let projectTrusted = false;
   if (loaded.projectServers.size > 0) {
     try {
@@ -636,11 +638,13 @@ async function runDoctor(argv, log, error) {
       timedOut,
     ]);
     clearTimeout(timer);
+    const ignoredSettings = types.describeIgnoredSettings(provenance.get(name));
     return {
       name,
       state: result.state,
       tools: result.tools ?? null,
       message: result.message ? utils.sanitizeTerminalText(redactDoctorMessage(result.message, definition, utils)) : null,
+      ...(ignoredSettings ? { ignoredSettings: utils.sanitizeTerminalText(ignoredSettings) } : {}),
     };
   }));
 
@@ -654,6 +658,7 @@ async function runDoctor(argv, log, error) {
       for (const result of results) {
         const tools = result.tools === null ? "" : `, ${result.tools} tool${result.tools === 1 ? "" : "s"}`;
         log(`${utils.sanitizeTerminalText(result.name)}: ${result.state}${tools}${result.message ? ` — ${result.message}` : ""}`);
+        if (result.ignoredSettings) log(`  ${result.ignoredSettings}`);
       }
     }
   } finally {

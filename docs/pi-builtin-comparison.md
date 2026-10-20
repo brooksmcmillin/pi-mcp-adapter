@@ -45,7 +45,8 @@ Pi's `codemode` scripts work with both. Sign-ins made with the built-in can be i
 | Tasks (long-running tool calls) | No | Supported when the server advertises the Tasks extension on an MCP 2026-07-28 connection, which needs `protocolVersion: "auto"` or `"2026-07-28"` ([Task-augmented tool calls](servers.md#task-augmented-tool-calls), [Protocol version negotiation](servers.md#protocol-version-negotiation)) |
 | MCP UI (interactive tool pages) | UI resources are left out ([Use resources](https://pi.dev/docs/latest/mcp#use-resources)) | Tool UIs open in a native macOS window or the browser and can call tools ([MCP UI integration](prompts-and-ui.md#mcp-ui-integration)) |
 | Resources (data a server exposes) | `list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource` tools ([Use resources](https://pi.dev/docs/latest/mcp#use-resources)) | Resources exposed as tools, on by default (`exposeResources`) ([Settings](configuration.md#settings)) |
-| Roots (the session directory, sent to servers) | Sent | Not declared ([Task-augmented tool calls](servers.md#task-augmented-tool-calls)) |
+| Roots (the session directory, sent to servers) | Sent | Sent |
+| Server log messages | Appended to `~/.pi/agent/mcp.log` | Appended to the same file, in the same format |
 
 ## How the model finds and calls tools
 

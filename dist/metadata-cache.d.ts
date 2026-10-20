@@ -3,6 +3,11 @@ import { type ToolPrefix, type ToolSelectorCandidateIndex } from "./types.ts";
 export type { CachedPrompt, CachedResource, CachedTool, MetadataCache, ServerCacheEntry } from "./types.ts";
 export declare function getMetadataCachePath(): string;
 export declare function loadMetadataCache(): MetadataCache | null;
+/**
+ * The cache plus what this session already listed. Private or zero-TTL listings are never
+ * persisted as valid, but this session's own listing still counts for this session.
+ */
+export declare function withSessionMetadata(cache: MetadataCache | null, config: McpConfig, sessionMetadata: ReadonlyMap<string, ServerCacheEntry> | undefined): MetadataCache | null;
 export declare function saveMetadataCache(cache: MetadataCache, options?: {
     startupSnapshot?: MetadataCache["servers"];
 }): void;

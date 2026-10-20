@@ -7,9 +7,15 @@ const mocks = vi.hoisted(() => ({
   clients: [] as any[],
   transports: [] as any[],
   open: vi.fn(async () => undefined),
+  attachTaskSession: vi.fn(async (_options: any) => undefined),
 }));
 
 vi.mock("open", () => ({ default: mocks.open }));
+
+vi.mock("../mcp-tasks.ts", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  attachTaskSession: mocks.attachTaskSession,
+}));
 
 vi.mock("@modelcontextprotocol/client", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -49,6 +55,7 @@ describe("McpServerManager sampling", () => {
     mocks.clients.length = 0;
     mocks.transports.length = 0;
     mocks.open.mockClear();
+    mocks.attachTaskSession.mockClear();
   });
 
   afterEach(() => {
@@ -149,7 +156,8 @@ describe("McpServerManager sampling", () => {
         url: "https://example.com/connect",
       },
     });
-    const completionHandler = client.setNotificationHandler.mock.calls[0][1];
+    const completionHandler = client.setNotificationHandler.mock.calls
+      .find(([method]: [string]) => method === "notifications/elicitation/complete")[1];
     completionHandler({ params: { elicitationId: "unknown-id" } });
     completionHandler({ params: { elicitationId: "known-id" } });
     completionHandler({ params: { elicitationId: "known-id" } });
@@ -256,6 +264,30 @@ describe("McpServerManager sampling", () => {
       { mode: "auto" },
       { mode: { pin: "2026-07-28" } },
     ]);
+  });
+
+  it("does not advertise MCP Apps to a server with openUi: false", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    const manager = new McpServerManager();
+    manager.setSamplingConfig({
+      autoApprove: true,
+      modelRegistry: {} as any,
+      getCurrentModel: () => undefined,
+      getSignal: () => undefined,
+    });
+
+    await manager.connect("headless", { command: "node", args: ["server.js"], openUi: false });
+    await manager.connect("windowed", { command: "node", args: ["server.js"] });
+
+    const sessionCapabilities = mocks.attachTaskSession.mock.calls.map(([options]) => options.clientCapabilities);
+    expect(mocks.clients[0].options.capabilities).toEqual({ sampling: {} });
+    expect(sessionCapabilities[0]).toEqual({ sampling: {} });
+    const windowed = {
+      extensions: { "io.modelcontextprotocol/ui": { mimeTypes: [RESOURCE_MIME_TYPE] } },
+      sampling: {},
+    };
+    expect(mocks.clients[1].options.capabilities).toEqual(windowed);
+    expect(sessionCapabilities[1]).toEqual(windowed);
   });
 
   it("refreshes cached lists and ignores notifications from replaced clients", async () => {

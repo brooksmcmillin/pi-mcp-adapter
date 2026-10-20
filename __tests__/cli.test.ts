@@ -504,7 +504,8 @@ describe("cli System One key helper", () => {
   });
 });
 
-describe("cli doctor", () => {
+// Each test spawns the CLI, which can take seconds under load; match the doctor() child timeout.
+describe("cli doctor", { timeout: 30_000 }, () => {
   const cliPath = resolve("cli.js");
   const fixtureUrl = pathToFileURL(resolve("__tests__/fixtures/tools-only-server.mjs")).href;
   const servers: Server[] = [];
@@ -560,6 +561,18 @@ describe("cli doctor", () => {
     const old = await doctor([], context, fakePi("0.87.0"));
     expect(old.stdout).not.toContain("fromPi");
     expect(old.stderr).toContain("Pi's own mcp.json files were not checked");
+  });
+
+  it("lists settings OpenCode ignores under an imported server", async () => {
+    const context = setup({ imports: ["opencode"], mcpServers: {} });
+    writeJson(join(context.home, ".config", "opencode", "opencode.json"), {
+      mcp: { calendar: { type: "local", command: [process.execPath, "-e", "process.exit(1)"], args: ["--x"] } },
+    });
+
+    const result = await doctor([], context);
+
+    expect(result.stdout).toContain(`calendar: failed`);
+    expect(result.stdout).toContain(`\n  Ignored OpenCode settings: args\n`);
   });
 
   it("exits 1 and explains a refused local server", async () => {
