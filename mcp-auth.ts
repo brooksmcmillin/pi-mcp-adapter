@@ -14,7 +14,7 @@ import { spawnSync } from 'child_process';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { getAgentPath } from './agent-dir.ts';
 import { resolveConfiguredOAuthDir } from './config.ts';
@@ -668,6 +668,7 @@ export function getAuthStorageOptions(
   persistence: unknown = undefined,
   oauthCredentialStore: unknown = undefined,
   sessionOwner?: object,
+  launchConfigPath?: string,
 ): AuthStorageOptions {
   if (persistence !== undefined && persistence !== 'persistent' && persistence !== 'session') {
     throw new Error('settings.oauthPersistence must be "persistent" or "session"');
@@ -681,13 +682,18 @@ export function getAuthStorageOptions(
   const baseDir = resolveConfiguredOAuthDir(oauthDir, cwd);
   if (persistence === 'session') {
     let stores: Map<string, AuthStorageOptions> | undefined;
-    const namespace = getAuthBaseDir(baseDir ? { baseDir } : {});
-    if (sessionOwner) {
+    const authDir = getAuthBaseDir(baseDir ? { baseDir } : {});
+    // An explicit CLI config belongs to the launch, not the conversation Pi replaces on resume.
+    const storageOwner = launchConfigPath === undefined ? sessionOwner : process;
+    const namespace = launchConfigPath === undefined
+      ? authDir
+      : JSON.stringify([authDir, resolve(cwd, launchConfigPath)]);
+    if (storageOwner) {
       const registry = sessionAuthRegistry[SESSION_AUTH_STORES] ??= new WeakMap();
-      stores = registry.get(sessionOwner);
+      stores = registry.get(storageOwner);
       if (!stores) {
         stores = new Map();
-        registry.set(sessionOwner, stores);
+        registry.set(storageOwner, stores);
       }
       const existing = stores.get(namespace);
       if (existing) {

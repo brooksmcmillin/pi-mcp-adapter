@@ -73,7 +73,7 @@ You can optionally provide a pre-registered client:
 
 ### Configuration Options
 
-- `settings.oauthPersistence` - `"persistent"` (default) stores credentials in the operating-system credential store. `"session"` keeps credentials in host-session memory across `/reload`, requiring independent authorization for separate Pi session managers. Logout clears server credentials; process exit discards memory.
+- `settings.oauthPersistence` - `"persistent"` (default) stores credentials in the operating-system credential store. `"session"` keeps credentials in memory across `/reload`. Explicit `--mcp-config` launches also retain them across conversation changes; otherwise separate Pi session managers require independent authorization. Logout clears server credentials; process exit discards memory.
 - `url` - The MCP server URL (required)
 - `auth` - Set to `"oauth"` to force OAuth, `false` to disable, or omit to auto-detect
 - `oauth.grantType` - `"authorization_code"` (default, browser flow), `"client_credentials"` (non-interactive), or `"device_code"` (opt-in RFC 8628 pairing when advertised, otherwise authorization-code fallback)
@@ -167,6 +167,8 @@ adapter privately stores the returned cohort proof in the OS credential store.
 Subsequent independent launches with the same URL/slot enroll silently, each
 receiving distinct access, refresh and enrollment credentials in host-session
 memory. Enrollment proofs survive `/reload` for that host, not process exit.
+With an explicit `--mcp-config` launch, resuming or replacing a conversation
+retains the same enrollment instead of enrolling again under its launcher identity.
 Only the cohort proof is persistent; do not paste it into config, prompts or
 logs. For headless hosts, `settings.oauthCredentialStore: "encrypted-file"`
 selects the existing externally keyed encrypted backend for the cohort proof;
@@ -388,7 +390,7 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 Persistent OAuth entries are stored per configured server name in the operating system credential store, using macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret through `@napi-rs/keyring`. The stored entry contains tokens, dynamic client information, legacy verifier/state fields when present, and the server URL binding.
 
-With `settings.oauthPersistence: "session"`, the Pi session manager owns an in-memory credential namespace that survives extension `/reload` and conversation changes using that same manager. Tokens and dynamic client registration are retained; transports, callbacks, and pending authorization flows are still cancelled and rebuilt. Separate SDK session managers (including concurrent Pi processes) cannot read or overwrite one another's credentials, even for the same server name and URL. Server-name and URL binding remain enforced. Hosts without a session manager retain isolated adapter-local storage. Logout clears the server's credentials, and process exit discards all memory. Ordinary session OAuth never reads, migrates, removes, or writes persistent or legacy credentials. Explicit shared coding enrollment persists only its cohort proof, as described above. Session mode keeps access/refresh credentials in memory regardless of `settings.oauthCredentialStore`.
+With `settings.oauthPersistence: "session"`, an explicit `--mcp-config` CLI launch owns an in-memory credential namespace keyed by its resolved config path and OAuth directory. It survives extension `/reload` and conversation replacement, including `/resume`, even when Pi replaces the session manager. Different config paths and processes remain isolated. Without that CLI flag, storage remains owned by the Pi session manager. Programmatic `createMcpAdapter({ configPath })` and inline-config factories also remain manager-owned, even under ambient CLI arguments: separate SDK session managers cannot read or overwrite one another's credentials, even for the same server name and URL. Tokens and dynamic client registration are retained; transports, callbacks, and pending authorization flows are still cancelled and rebuilt. Server-name and URL binding remain enforced. Hosts without a session manager retain isolated adapter-local storage. Logout clears the server's credentials, and process exit discards all memory. Ordinary session OAuth never reads, migrates, removes, or writes persistent or legacy credentials. Explicit shared coding enrollment persists only its cohort proof, as described above. Session mode keeps access/refresh credentials in memory regardless of `settings.oauthCredentialStore`.
 
 A broker launcher identity may already be bound to an OAuth session. If its credentials are genuinely lost or revoked, exit Pi and start a fresh launcher invocation with a new identity before pairing again; repeated authentication under the old identity is not a recovery mechanism.
 

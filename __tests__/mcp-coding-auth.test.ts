@@ -179,6 +179,23 @@ describe("coding enrollment v1", () => {
     expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(0)
   })
 
+  it("retains CLI enrollment and logout fences across replacement managers", async () => {
+    const b = broker(), c = config(), launch = `coding-launch-${randomUUID()}.json`
+    const s = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, launch)
+    await initial(s, c)
+    const resumed = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, launch)
+    const provider = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, resumed)
+    await expect(provider.tokens()).resolves.toMatchObject({ access_token: "synthetic-access-1" })
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(0)
+
+    await removeAuth("broker", { authStorageOptions: resumed })
+    const afterLogout = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, launch)
+    const next = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, afterLogout)
+    await expect(next.tokens()).rejects.toThrow(/revoked/)
+    expect(getAuthEntry("broker", afterLogout)).toBeUndefined()
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(0)
+  })
+
   it.each([404, 405, 200])("gives safe version fallback guidance for unsupported response %i", async status => {
     broker(); const c = config(), s = storage(); await initial(s, c)
     const provider = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)

@@ -1097,12 +1097,15 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       owner.addCleanup(() => cleanupMaterializedBinaryResources(owner.signal));
       assertRuntimeGuard(guard);
       const initialization = core.initializeMcp(pi, ctx, owner, {
-        ...(programmaticConfig || options.configPath !== undefined
+        ...(programmaticConfig || earlyConfigPath !== undefined
           ? {
               ...(earlyConfigPath !== undefined ? { configPath: earlyConfigPath } : {}),
               ...(sessionConfig !== undefined ? { config: sessionConfig } : {}),
             }
           : {}),
+        ...(programmaticConfig || options.configPath !== undefined || earlyConfigPath === undefined
+          ? {}
+          : { launchConfigPath: earlyConfigPath }),
         oauthRuntime,
         excludeProjectServers,
         // Pi awaits session_start handlers in order. Returning before the approval

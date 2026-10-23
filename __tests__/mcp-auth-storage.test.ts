@@ -388,6 +388,47 @@ describe("mcp-auth storage paths", () => {
     expect(getAuthForUrl("broker-original", url, afterLogout)).toBeUndefined();
   });
 
+  it("retains explicit CLI launch credentials across replacement session managers", () => {
+    const configPath = join(process.cwd(), "resume-launch.json");
+    const url = "https://example.com/mcp";
+    const storage = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, configPath);
+    saveAuthEntry("broker", { tokens: { accessToken: "launch-token" } }, url, storage);
+
+    const resumed = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, configPath);
+    expect(resumed).toBe(storage);
+    expect(getAuthForUrl("broker", url, resumed)?.tokens?.accessToken).toBe("launch-token");
+    expect(getAuthForUrl("broker", "https://other.example/mcp", resumed)).toBeUndefined();
+    expect(getAuthForUrl("other", url, resumed)).toBeUndefined();
+    const otherLaunch = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, `${configPath}.other`);
+    expect(getAuthForUrl("broker", url, otherLaunch)).toBeUndefined();
+    const sdkSession = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {});
+    expect(getAuthForUrl("broker", url, sdkSession)).toBeUndefined();
+    expect(getTestAuthSecretStoreEntries()).toHaveLength(0);
+
+    clearAllCredentials("broker", resumed);
+    const afterLogout = getAuthStorageOptions(undefined, process.cwd(), "session", undefined, {}, configPath);
+    expect(getAuthForUrl("broker", url, afterLogout)).toBeUndefined();
+  });
+
+  it("isolates CLI OAuth directories while retaining each namespace after replacement", () => {
+    delete process.env.MCP_OAUTH_DIR;
+    const configPath = join(process.cwd(), "oauth-directory-launch.json");
+    const url = "https://example.com/mcp";
+    const first = getAuthStorageOptions(".pi/oauth-a", process.cwd(), "session", undefined, {}, configPath);
+    const second = getAuthStorageOptions(".pi/oauth-b", process.cwd(), "session", undefined, {}, configPath);
+    expect(getAuthStorageIdentity(first)).not.toBe(getAuthStorageIdentity(second));
+    saveAuthEntry("broker", { tokens: { accessToken: "first-directory-token" } }, url, first);
+    expect(getAuthForUrl("broker", url, second)).toBeUndefined();
+    saveAuthEntry("broker", { tokens: { accessToken: "second-directory-token" } }, url, second);
+    const resumedFirst = getAuthStorageOptions(".pi/oauth-a", process.cwd(), "session", undefined, {}, configPath);
+    const resumedSecond = getAuthStorageOptions(".pi/oauth-b", process.cwd(), "session", undefined, {}, configPath);
+    expect(resumedFirst).toBe(first);
+    expect(resumedSecond).toBe(second);
+    expect(getAuthForUrl("broker", url, resumedFirst)?.tokens?.accessToken).toBe("first-directory-token");
+    expect(getAuthForUrl("broker", url, resumedSecond)?.tokens?.accessToken).toBe("second-directory-token");
+    expect(getTestAuthSecretStoreEntries()).toHaveLength(0);
+  });
+
   it("isolates host storage when the configured OAuth namespace changes", () => {
     delete process.env.MCP_OAUTH_DIR;
     const host = {};

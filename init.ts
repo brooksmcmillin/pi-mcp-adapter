@@ -103,6 +103,8 @@ export function isTuiMode(ctx: Pick<ExtensionContext, "hasUI" | "mode">): boolea
 
 type McpInitializationOptions = McpAdapterOptions & {
   oauthRuntime?: McpOAuthRuntime;
+  /** Only the default CLI adapter may retain credentials across conversation replacement. */
+  launchConfigPath?: string;
   statusEvents?: McpExtensionState["statusEvents"];
   onProjectTrustResolved?: () => void;
   /** Load-time runs have no Pi context, so project trust is unknown; session_start decides later. */
@@ -162,6 +164,7 @@ export async function initializeMcp(
     config.settings?.oauthPersistence,
     config.settings?.oauthCredentialStore,
     sessionManager,
+    options.launchConfigPath,
   );
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;
