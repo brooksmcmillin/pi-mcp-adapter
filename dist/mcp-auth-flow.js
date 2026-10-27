@@ -15,7 +15,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.js";
 import { authenticateDevice } from "./mcp-device-auth.js";
-import { getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.js";
+import { beginCodingSessionReplacement, CodingConsentRequired, getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.js";
 function pluginAwareOAuthHeaders(definition) {
     return oauthHeaderResolver(definition?.headers, {
         literal: definition ? isBuiltInAgentPlugin(definition, "headers") : false,
@@ -364,12 +364,27 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
     const explainRejection = (error) => {
         throw error instanceof RegistrationRejectedError ? explainRegistrationRejection(error, serverUrl) : error;
     };
+    const retainedCoding = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions);
+    if (retainedCoding)
+        config.codingEnrollment = retainedCoding;
+    let codingConsentRequired = false;
     if (config.codingEnrollment) {
-        const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) });
-        authority();
-        throwIfAborted(signal);
-        if (existing)
-            return { authorizationUrl: "" };
+        try {
+            const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) });
+            authority();
+            throwIfAborted(signal);
+            if (existing)
+                return { authorizationUrl: "" };
+        }
+        catch (error) {
+            // Only this explicit sign-in path may request new human consent. Token reads
+            // and reconnect remain terminal and never fall back to a new enrollment.
+            if (!(error instanceof CodingConsentRequired))
+                throw error;
+            codingConsentRequired = true;
+            authority();
+            throwIfAborted(signal);
+        }
     }
     if (config.grantType === "device_code") {
         const key = getPendingAuthKey(serverName, authStorageOptions);
@@ -491,6 +506,8 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
             capturedUrl = url;
         },
     }, authStorageOptions, runtime.signal, oauthState, authority);
+    if (codingConsentRequired)
+        authProvider.requestCodingConsent();
     try {
         const storedAuth = await getAuthForUrl(serverName, serverUrl, authStorageOptions);
         authority();
@@ -1112,6 +1129,28 @@ export async function removeAuth(serverName, options = {}) {
     }
     finally {
         releaseRevocation();
+    }
+}
+/** Host-only deliberate conversation replacement; never called by reconnect or reload. */
+export async function replaceCodingSession(serverName, serverUrl, options) {
+    const runtime = getRuntime(options);
+    const signal = combineAbortSignals(runtime.signal, options.signal);
+    throwIfAborted(signal);
+    const storage = options.authStorageOptions ?? {};
+    captureOAuthAuthority(serverName, true, storage)();
+    // Validate the coding binding before changing any ordinary OAuth authority.
+    const activate = beginCodingSessionReplacement(serverName, serverUrl, storage);
+    const release = beginOAuthRevocation(serverName, storage);
+    try {
+        detachPendingAuthsForServer(serverName, new Error("Authorization cancelled by conversation replacement"));
+        clearAllCredentials(serverName, storage);
+        await options.retire();
+        throwIfAborted(signal);
+        activate();
+    }
+    finally {
+        // Failure/cancellation leaves the replacement denied, never restores old bearers.
+        release();
     }
 }
 /**

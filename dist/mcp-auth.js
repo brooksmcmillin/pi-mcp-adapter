@@ -40,7 +40,10 @@ const KEYRING_RECOVERY_TIMEOUT_MS = 10_000;
 const AUTH_CHUNK_MANIFEST_KEY = '__piMcpAdapterOAuthChunked';
 const OAUTH_FILE_KEY_ENV = 'PI_MCP_ADAPTER_OAUTH_FILE_KEY';
 const ENCRYPTED_FILE_AAD_CONTEXT = 'pi-mcp-adapter.oauth.encrypted-file.v1';
-const oauthLifecycleRecords = new Map();
+// Captured providers/fetches can outlive a module reload; their fences must too.
+const OAUTH_LIFECYCLES = Symbol.for('pi-mcp-adapter.oauth-lifecycles.v1');
+const lifecycleHost = globalThis;
+const oauthLifecycleRecords = lifecycleHost[OAUTH_LIFECYCLES] ??= new Map();
 function getOAuthLifecycleRecord(serverName, options) {
     const scope = options.persistence === 'session'
         ? getAuthStorageIdentity(options)

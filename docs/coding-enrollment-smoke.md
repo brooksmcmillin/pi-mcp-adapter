@@ -2,6 +2,8 @@
 
 Task: https://nexus.brooksmcmillin.com/task/7335
 
+For deliberate new conversations, see the [host replacement API and reset smoke](coding-session-replacement.md).
+
 This is a local synthetic benchmark, not live installation or deployment proof.
 The driver launches four separate Node/adapter processes sharing **only** an
 encrypted cohort-proof entry in a temporary directory. Each process owns its own

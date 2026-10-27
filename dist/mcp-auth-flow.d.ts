@@ -101,6 +101,10 @@ export declare function getAuthStatus(serverName: string, options?: Authenticate
  * @param serverName - The name of the MCP server
  */
 export declare function removeAuth(serverName: string, options?: AuthenticateOptions): Promise<void>;
+/** Host-only deliberate conversation replacement; never called by reconnect or reload. */
+export declare function replaceCodingSession(serverName: string, serverUrl: string, options: AuthenticateOptions & {
+    retire: () => Promise<void>;
+}): Promise<void>;
 /**
  * Check if OAuth is supported for a server configuration.
  * OAuth is supported for HTTP servers unless explicitly disabled.

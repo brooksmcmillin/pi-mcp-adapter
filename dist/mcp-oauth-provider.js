@@ -208,6 +208,7 @@ export class McpOAuthProvider {
     pendingCodingCredentials;
     pendingCodingAuthority;
     codingError;
+    codingConsentRequested = false;
     constructor(serverName, serverUrl, config, callbacks, storageOptions = {}, runtimeSignal, initialState, authority) {
         this.serverName = serverName;
         this.serverUrl = serverUrl;
@@ -317,6 +318,13 @@ export class McpOAuthProvider {
         }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() });
     }
     get codingEnrollmentEnabled() { this.adoptCodingSession(); return this.coding !== undefined; }
+    /** Explicit interactive sign-in only; never serve an old bearer to the SDK. */
+    requestCodingConsent() {
+        this.throwIfInactive();
+        if (!this.coding)
+            throw new Error("Coding consent requires a coding session");
+        this.codingConsentRequested = true;
+    }
     runPendingCodingCall(call, options) {
         this.adoptCodingSession();
         if (!this.coding)
@@ -579,6 +587,8 @@ export class McpOAuthProvider {
         this.throwIfInactive();
         this.adoptCodingSession();
         if (this.coding) {
+            if (this.codingConsentRequested)
+                return undefined;
             this.codingError = undefined;
             const issuer = ctx?.issuer ?? this.discoveredIssuer;
             if (issuer !== undefined && !issuersMatch(issuer, this.coding.issuer))
@@ -626,6 +636,7 @@ export class McpOAuthProvider {
                     throw new Error("Coding OAuth credential response mismatch");
                 this.pendingCodingAuthority();
                 this.coding.install(pending, this.pendingCodingAuthority);
+                this.codingConsentRequested = false;
                 this.pendingCodingCredentials = undefined;
                 this.pendingCodingAuthority = undefined;
             }

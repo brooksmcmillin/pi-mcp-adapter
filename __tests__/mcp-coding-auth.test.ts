@@ -8,7 +8,7 @@ import { CodingAuthClient, validateCodingConfig, type CodingCredentials } from "
 import { createOAuthFetch } from "../mcp-auth-fetch.ts"
 import { McpOAuthProvider } from "../mcp-oauth-provider.ts"
 import { completeAuthFromInput, createOAuthRuntime, extractOAuthConfig, getValidToken, removeAuth, shutdownOAuth, startAuth } from "../mcp-auth-flow.ts"
-import { getMcpOAuthTokensForUrl } from "../oauth.ts"
+import { getMcpOAuthTokensForUrl, replaceMcpCodingSession } from "../oauth.ts"
 import { captureOAuthAuthority, getAuthEntry, getAuthStorageOptions, type AuthStorageOptions } from "../mcp-auth.ts"
 
 // Byte-identical contract from infra@a665b5629c1375f296db7d1be115b1b5dbc24255.
@@ -26,6 +26,7 @@ function broker() {
   let index = 1
   let paused = false
   let expired = false
+  let cohortRevoked = false
   const rows = new Map<string, CodingCredentials>()
   const revoked = new Set<string>()
   const requests: { route: string; fields: string[] }[] = []
@@ -49,6 +50,7 @@ function broker() {
       rows.set(issued.enrollment_token, issued)
       return json(issued)
     }
+    if (path === "/broker/coding/enroll" && cohortRevoked) return json({ error: "invalid_grant" }, 403)
     const row = rows.get(params.enrollment_token)
     if (path !== "/broker/coding/enroll" && (!row || revoked.has(params.enrollment_token))) return json({ error: "invalid_grant", error_description: "synthetic-cohort" }, 403)
     if (path === "/broker/coding/status") return json({ version: 1, status: paused ? "authorization_paused" : "active", authorization_ref: row!.authorization_ref,
@@ -63,7 +65,7 @@ function broker() {
     return json(issued)
   })
   vi.stubGlobal("fetch", fetchFn)
-  return { rows, revoked, requests, fetchFn, pause: () => { paused = true }, renew: () => { paused = false; expired = true }, expire: () => { expired = true } }
+  return { rows, revoked, requests, fetchFn, revokeCohort: () => { cohortRevoked = true }, pause: () => { paused = true }, renew: () => { paused = false; expired = true }, expire: () => { expired = true } }
 }
 const runtimes: ReturnType<typeof createOAuthRuntime>[] = []
 afterEach(async () => { for (const runtime of runtimes.splice(0)) await shutdownOAuth(runtime); vi.unstubAllGlobals(); vi.restoreAllMocks() })
@@ -77,6 +79,201 @@ async function initial(s: AuthStorageOptions, c: ReturnType<typeof config>) {
   expect(result.authorizationUrl).not.toMatch(/synthetic-(?:cohort|access|refresh|enrollment)/)
   return { runtime, definition, authStorageOptions: s }
 }
+
+describe("explicit coding conversation replacement", () => {
+  it("retires old consumers while independently enrolling the successor and preserving another launch", async () => {
+    const b = broker(), c = config(), s = storage(), other = storage()
+    const opts = await initial(s, c)
+    const old = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)
+    const capturedFetch = old.getAuthFetch()
+    const client = new CodingAuthClient("broker", url, c.codingEnrollment, s)
+    const peer = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, other)
+    const peerTokens = await peer.tokens()
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {
+      b.revoked.add("synthetic-enrollment-1")
+      expect(getAuthEntry("broker", s)).toBeUndefined()
+      expect(() => new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)).toThrow(/no longer active/)
+    } })
+    await expect(old.tokens()).rejects.toThrow(/no longer active/)
+    await expect(capturedFetch(url)).rejects.toThrow(/no longer active/)
+    expect(() => client.install(proof(99), () => {})).toThrow(/no longer active/)
+    await expect(client.tokens(b.fetchFn, () => {})).rejects.toThrow(/no longer active/)
+    const next = await getMcpOAuthTokensForUrl("broker", url, opts)
+    expect(next?.accessToken).toBe("synthetic-access-3")
+    expect(next?.refreshToken).not.toBe(peerTokens?.refresh_token)
+    expect((await peer.tokens())?.access_token).toBe(peerTokens?.access_token)
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(2)
+    b.revoked.add("synthetic-enrollment-3")
+    await expect(getMcpOAuthTokensForUrl("broker", url, opts)).rejects.toThrow(/revoked/)
+    await expect(new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s).tokens()).rejects.toThrow(/revoked/)
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(2)
+  })
+
+  it("fences captured fetches and providers across module reload", async () => {
+    broker()
+    const c = config(), s = storage(); await initial(s, c)
+    const old = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)
+    const capturedFetch = old.getAuthFetch()
+    vi.resetModules()
+    const { replaceMcpCodingSession: reloaded } = await import("../oauth.ts")
+    await reloaded("broker", url, { authStorageOptions: s, retire: async () => {} })
+    await expect(old.tokens()).rejects.toThrow(/no longer active/)
+    await expect(capturedFetch(url)).rejects.toThrow(/no longer active/)
+    expect((await getMcpOAuthTokensForUrl("broker", url, { authStorageOptions: s }))?.accessToken).toBe("synthetic-access-2")
+  })
+
+  it.each(["provider", "helper"])("fences a pending %s token read", async consumer => {
+    const b = broker(), c = config(), s = storage(), opts = await initial(s, c)
+    let entered!: () => void, finish!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await b.fetchFn(input, init)
+      if (String(input).endsWith("/status")) { entered(); await gate }
+      return response
+    })
+    const pending = consumer === "provider"
+      ? new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s).tokens()
+      : getMcpOAuthTokensForUrl("broker", url, opts)
+    void pending.catch(() => {})
+    await started
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    finish()
+    await expect(pending).rejects.toThrow(/no longer active/)
+    expect(getAuthEntry("broker", s)).toBeUndefined()
+  })
+
+  it.each(["success", "cancel", "failure"])("fences a late rotation on %s without leaking it to the new generation", async outcome => {
+    const b = broker(), c = config(), s = storage()
+    const opts = await initial(s, c); b.expire()
+    let entered!: () => void, finish!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    const provider = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)
+    provider.setAuthFetch(createOAuthFetch(url, undefined, undefined, { delegate: async (input, init) => {
+      const result = await b.fetchFn(input, init)
+      if (String(input).endsWith("/replace")) { entered(); await gate }
+      return result
+    } }))
+    const pending = provider.tokens(); void pending.catch(() => {})
+    await started
+    const controller = new AbortController()
+    const reset = replaceMcpCodingSession("broker", url, { ...opts, signal: controller.signal, retire: async () => {
+      if (outcome === "cancel") controller.abort()
+      if (outcome === "failure") throw new Error("retirement failed")
+    } })
+    if (outcome === "success") await reset
+    else await expect(reset).rejects.toThrow()
+    finish()
+    await expect(pending).rejects.toThrow(/no longer active/)
+    expect(getAuthEntry("broker", s)).toBeUndefined()
+    if (outcome !== "success") {
+      await expect(getMcpOAuthTokensForUrl("broker", url, opts)).rejects.toThrow(/revoked/)
+      await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    }
+    expect((await getMcpOAuthTokensForUrl("broker", url, opts))?.accessToken).toBe("synthetic-access-3")
+  })
+
+  it("does not affect ordinary OAuth or mutate state on pre-cancellation or wrong URL", async () => {
+    broker()
+    const c = config(), s = storage(), opts = await initial(s, c)
+    const authority = captureOAuthAuthority("broker", true, s)
+    const retire = vi.fn(async () => {})
+    await expect(replaceMcpCodingSession("broker", "https://other.example/broker/mcp", { ...opts, retire })).rejects.toThrow(/different MCP URL/)
+    await expect(replaceMcpCodingSession("broker", url, { ...opts, signal: AbortSignal.abort(), retire })).rejects.toThrow()
+    await expect(replaceMcpCodingSession("ordinary", url, { ...opts, retire })).rejects.toThrow(/existing coding/)
+    expect(retire).not.toHaveBeenCalled()
+    expect(authority).not.toThrow()
+    expect((await getMcpOAuthTokensForUrl("broker", url, opts))?.accessToken).toBe("synthetic-access-1")
+  })
+
+  it.each(["failure", "cancel"])("keeps %s retirement denied across rebinding to an already-authorized cohort", async outcome => {
+    const b = broker(), c = config(), otherConfig = config(), s = storage()
+    const opts = await initial(s, c)
+    await initial(storage(), otherConfig)
+    const controller = new AbortController()
+    await expect(replaceMcpCodingSession("broker", url, { ...opts, signal: controller.signal, retire: async () => {
+      if (outcome === "cancel") controller.abort()
+      else throw new Error("retirement failed")
+    } })).rejects.toThrow()
+    const count = b.requests.length
+    await expect(getMcpOAuthTokensForUrl("broker", url, { ...opts, definition: { oauth: otherConfig } })).rejects.toThrow(/revoked/)
+    await expect(getMcpOAuthTokensForUrl("broker", url, opts)).rejects.toThrow(/revoked/)
+    expect(b.requests).toHaveLength(count)
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    expect(await getMcpOAuthTokensForUrl("broker", url, opts)).toBeDefined()
+  })
+
+  it("retires a late human sign-in without cancelling another launch's pending consent", async () => {
+    const b = broker(), c = config(), s = storage(), peer = storage()
+    const runtime = createOAuthRuntime(); runtimes.push(runtime)
+    const opts = { runtime, authStorageOptions: s }, peerOpts = { runtime, authStorageOptions: peer }
+    const definition = { url, oauth: { ...c, redirectUri: "https://callback.example/complete" } }
+    const first = await startAuth("broker", url, definition, opts)
+    const second = await startAuth("broker", url, definition, peerOpts)
+    const callback = (authorizationUrl: string) => `https://callback.example/complete?code=synthetic-code&state=${new URL(authorizationUrl).searchParams.get("state")}&iss=${encodeURIComponent(`${origin}/broker`)}`
+    let entered!: () => void, finish!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve }), gate = new Promise<void>(resolve => { finish = resolve })
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await b.fetchFn(input, init)
+      if (String(input).endsWith("/token")) { entered(); await gate }
+      return response
+    })
+    const pending = completeAuthFromInput("broker", callback(first.authorizationUrl), opts); void pending.catch(() => {})
+    await started
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    finish()
+    await expect(pending).rejects.toThrow()
+    expect(getAuthEntry("broker", s)).toBeUndefined()
+    expect(await getMcpOAuthTokensForUrl("broker", url, opts)).toBeUndefined()
+    await expect(completeAuthFromInput("broker", callback(second.authorizationUrl), peerOpts)).resolves.toBe("authenticated")
+    expect((await getMcpOAuthTokensForUrl("broker", url, peerOpts))?.accessToken).toBe("synthetic-access-2")
+  })
+
+  it.each(["failure", "cancel"])("keeps token reads denied after %s of successor consent with omitted definition", async outcome => {
+    const b = broker(), c = config(), s = storage(), opts = await initial(s, c)
+    b.revokeCohort()
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    await expect(getMcpOAuthTokensForUrl("broker", url, opts)).rejects.toThrow(/revoked/)
+    const result = await startAuth("broker", url, undefined, opts)
+    expect(result.authorizationUrl).toContain("/broker/authorize")
+    const before = b.requests.filter(r => r.route.endsWith("/enroll")).length
+    if (outcome === "failure") {
+      const state = new URL(result.authorizationUrl).searchParams.get("state")!
+      await expect(completeAuthFromInput("broker", `https://callback.example/complete?code=bad&state=${state}&iss=https://wrong.example`, opts)).rejects.toThrow(/issuer/)
+    } else await shutdownOAuth(opts.runtime)
+    const nextRuntime = createOAuthRuntime(); runtimes.push(nextRuntime)
+    const nextOpts = { runtime: nextRuntime, authStorageOptions: s }
+    await expect(getMcpOAuthTokensForUrl("broker", url, nextOpts)).rejects.toThrow(/revoked/)
+    await expect(new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s).tokens()).rejects.toThrow(/revoked/)
+    expect(getAuthEntry("broker", s)?.tokens).toBeUndefined()
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(before)
+  })
+
+  it("requests real human consent after revoked cohort proof without automatic enrollment retries", async () => {
+    const b = broker(), c = config(), s = storage(), opts = await initial(s, c)
+    b.revokeCohort()
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    await expect(getMcpOAuthTokensForUrl("broker", url, opts)).rejects.toThrow(/fresh human consent/)
+    const before = b.requests.filter(r => r.route.endsWith("/enroll")).length
+    const result = await startAuth("broker", url, opts.definition, opts)
+    expect(result.authorizationUrl).toContain("/broker/authorize")
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(before)
+    const state = new URL(result.authorizationUrl).searchParams.get("state")!
+    await completeAuthFromInput("broker", `https://callback.example/complete?code=synthetic-code&state=${state}&iss=${encodeURIComponent(`${origin}/broker`)}`, opts)
+    expect((await getMcpOAuthTokensForUrl("broker", url, opts))?.accessToken).toBe("synthetic-access-2")
+  })
+
+  it("requires human consent when the successor has no cohort authorization", async () => {
+    broker()
+    const c = config(), s = storage(), runtime = createOAuthRuntime(); runtimes.push(runtime)
+    new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)
+    const opts = { runtime, authStorageOptions: s }
+    await replaceMcpCodingSession("broker", url, { ...opts, retire: async () => {} })
+    expect(await getMcpOAuthTokensForUrl("broker", url, opts)).toBeUndefined()
+    expect((await startAuth("broker", url, { url, oauth: c }, opts)).authorizationUrl).toContain("/broker/authorize")
+  })
+})
 
 describe("coding enrollment v1", () => {
   it("validates opt-in config without accepting proof fields or unsupported grants/storage", () => {

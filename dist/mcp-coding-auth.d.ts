@@ -18,9 +18,14 @@ declare const credentialSchema: z.ZodObject<{
     cohort_credential: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export type CodingCredentials = z.infer<typeof credentialSchema>;
+export declare class CodingConsentRequired extends Error {
+    constructor();
+}
 type RecoveryMode = "ensure" | "status" | "replace";
 export declare function getRetainedCodingConfig(name: string, url: string, storage: AuthStorageOptions): CodingEnrollmentConfig | undefined;
 export declare function logoutCodingLaunch(name: string, storage: AuthStorageOptions): void;
+/** Retire local enrollment state; only the host's completed reset may activate its successor. */
+export declare function beginCodingSessionReplacement(name: string, url: string, storage: AuthStorageOptions): () => void;
 export declare function validateCodingConfig(value: unknown): CodingEnrollmentConfig;
 /** Cohort names select private secure-store entries; they are never authority. */
 export declare class CodingAuthClient {
@@ -28,6 +33,7 @@ export declare class CodingAuthClient {
     private url;
     private storage;
     private readonly state;
+    private readonly assertAuthority;
     private readonly cohortAccount;
     private readonly persistent;
     readonly issuer: string;

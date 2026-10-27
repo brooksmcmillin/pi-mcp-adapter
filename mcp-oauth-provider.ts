@@ -277,6 +277,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private pendingCodingCredentials: CodingCredentials | undefined
   private pendingCodingAuthority: OAuthAuthority | undefined
   private codingError: Error | undefined
+  private codingConsentRequested = false
 
   constructor(
     private serverName: string,
@@ -380,6 +381,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
     }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() })
   }
   get codingEnrollmentEnabled(): boolean { this.adoptCodingSession(); return this.coding !== undefined }
+
+  /** Explicit interactive sign-in only; never serve an old bearer to the SDK. */
+  requestCodingConsent(): void {
+    this.throwIfInactive()
+    if (!this.coding) throw new Error("Coding consent requires a coding session")
+    this.codingConsentRequested = true
+  }
 
   runPendingCodingCall<T>(call: () => Promise<T>, options: CodingWaitOptions): Promise<T> {
     this.adoptCodingSession()
@@ -675,6 +683,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     this.throwIfInactive()
     this.adoptCodingSession()
     if (this.coding) {
+      if (this.codingConsentRequested) return undefined
       this.codingError = undefined
       const issuer = ctx?.issuer ?? this.discoveredIssuer
       if (issuer !== undefined && !issuersMatch(issuer, this.coding.issuer)) throw new Error("Coding OAuth issuer mismatch")
@@ -721,6 +730,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         if (pending.access_token !== tokens.access_token || pending.refresh_token !== tokens.refresh_token) throw new Error("Coding OAuth credential response mismatch")
         this.pendingCodingAuthority!()
         this.coding.install(pending, this.pendingCodingAuthority!)
+        this.codingConsentRequested = false
         this.pendingCodingCredentials = undefined
         this.pendingCodingAuthority = undefined
       } else if (getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)?.tokens?.accessToken !== tokens.access_token) {

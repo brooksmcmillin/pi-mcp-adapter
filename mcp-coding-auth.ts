@@ -5,7 +5,7 @@ import { abortable } from "./abort.ts"
 import { combineAbortSignals } from "./runtime-owner.ts"
 import { CodingAuthorizationPaused, CodingCredentialPaused, rejectedCodingReference, waitForCodingRenewal, CODING_WAIT_BUDGET_MS, type CodingWaitOptions } from "./coding-call-recovery.ts"
 import {
-  getAuthForUrl, getAuthStorageIdentity, invalidateAuthEntryCache, saveAuthEntry,
+  captureOAuthAuthority, getAuthForUrl, getAuthStorageIdentity, invalidateAuthEntryCache, saveAuthEntry,
   type AuthStorageOptions, type OAuthAuthority, type StoredTokens,
 } from "./mcp-auth.ts"
 
@@ -24,9 +24,12 @@ const statusSchema = z.object({
 })
 const unsupported = "Broker coding API v1 is required; upgrade the broker or disable oauth.codingEnrollment and use ordinary human OAuth consent."
 const terminal = "Coding enrollment revoked or invalid; start fresh human consent."
+export class CodingConsentRequired extends Error {
+  constructor() { super(terminal); this.name = "CodingConsentRequired" }
+}
 
 type RecoveryMode = "ensure" | "status" | "replace"
-type LaunchState = { epoch: number; calls?: Promise<unknown> | undefined; credentials?: CodingCredentials | undefined; denied: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode; selectedConfig?: CodingEnrollmentConfig | undefined }
+type LaunchState = { epoch: number; calls?: Promise<unknown> | undefined; credentials?: CodingCredentials | undefined; denied: boolean; replacementDenied?: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode; selectedConfig?: CodingEnrollmentConfig | undefined }
 const REGISTRY = Symbol.for("pi-mcp-adapter.coding-launches.v1")
 const host = globalThis as typeof globalThis & { [REGISTRY]?: WeakMap<object, Map<string, LaunchState>> }
 const registry = host[REGISTRY] ??= new WeakMap<object, Map<string, LaunchState>>()
@@ -58,6 +61,26 @@ export function logoutCodingLaunch(name: string, storage: AuthStorageOptions): v
   }
 }
 
+/** Retire local enrollment state; only the host's completed reset may activate its successor. */
+export function beginCodingSessionReplacement(name: string, url: string, storage: AuthStorageOptions): () => void {
+  const config = getRetainedCodingConfig(name, url, storage)
+  if (!config) throw new Error("Conversation replacement requires an existing coding session")
+  const states = launchStates(storage)
+  const identity = getAuthStorageIdentity(storage)
+  for (const [key, state] of states) {
+    const [launchName, , launchIdentity] = JSON.parse(key) as string[]
+    if (launchName !== name || launchIdentity !== identity) continue
+    state.epoch++
+    state.denied = true
+    state.credentials = undefined
+    state.selectedConfig = undefined
+    states.delete(key)
+  }
+  const replacement: LaunchState = { epoch: 0, denied: true, replacementDenied: true, selectedConfig: config }
+  states.set(JSON.stringify([name, url, identity, config.cohort]), replacement)
+  return () => { replacement.denied = false; replacement.replacementDenied = false }
+}
+
 export function validateCodingConfig(value: unknown): CodingEnrollmentConfig {
   const parsed = z.object({ version: z.literal(1), cohort: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) }).strict().safeParse(value)
   if (!parsed.success) throw new Error("oauth.codingEnrollment requires version: 1 and a non-secret cohort slot (letters, digits, _ or -)")
@@ -67,6 +90,7 @@ export function validateCodingConfig(value: unknown): CodingEnrollmentConfig {
 /** Cohort names select private secure-store entries; they are never authority. */
 export class CodingAuthClient {
   private readonly state: LaunchState
+  private readonly assertAuthority: OAuthAuthority
   private readonly cohortAccount: string
   private readonly persistent: AuthStorageOptions
   readonly issuer: string
@@ -78,6 +102,7 @@ export class CodingAuthClient {
       throw new Error("Coding enrollment requires the broker /broker/mcp HTTPS endpoint (HTTP is allowed only on loopback)")
     }
     if (storage.persistence !== "session") throw new Error("Coding enrollment requires settings.oauthPersistence: session; access/refresh tokens must never be shared")
+    this.assertAuthority = captureOAuthAuthority(name, true, storage)
     this.issuer = `${endpoint.origin}/broker`
     this.persistent = { ...(storage.cohortCredentialStore ? { credentialStore: storage.cohortCredentialStore } : {}) }
     this.cohortAccount = `coding-cohort-${createHash("sha256").update(JSON.stringify([url, config.cohort])).digest("hex")}`
@@ -91,6 +116,7 @@ export class CodingAuthClient {
     for (const [launchKey, launch] of launches) {
       const [launchName, , identity] = JSON.parse(launchKey) as string[]
       if (launchName === name && identity === getAuthStorageIdentity(storage)) {
+        if (launch.replacementDenied) { state.denied = true; state.replacementDenied = true }
         if (launch !== state && launch.selectedConfig) launch.epoch = (launch.epoch ?? 0) + 1
         launch.selectedConfig = undefined
       }
@@ -106,6 +132,7 @@ export class CodingAuthClient {
   }
 
   install(payload: CodingCredentials, check: OAuthAuthority, recovery = false): void {
+    this.assertAuthority()
     check()
     if (!this.state.selectedConfig) throw new Error("Coding session configuration changed; use the current configuration")
     if (payload.cohort_credential) {
@@ -114,7 +141,14 @@ export class CodingAuthClient {
     check()
     const entry = getAuthForUrl(this.name, this.url, this.storage) ?? {}
     saveAuthEntry(this.name, { ...entry, tokens: this.toStored(payload) }, this.url, this.storage)
-    if (!recovery) this.state.epoch++
+    if (!recovery) {
+      this.state.epoch++
+      // Fresh human consent, unlike config rebinding, can recover failed retirement.
+      for (const [key, state] of launchStates(this.storage)) {
+        const [name, , identity] = JSON.parse(key) as string[]
+        if (name === this.name && identity === getAuthStorageIdentity(this.storage)) state.replacementDenied = false
+      }
+    }
     this.state.credentials = payload
     this.state.denied = false
   }
@@ -132,8 +166,8 @@ export class CodingAuthClient {
 
   async tokens(fetchFn: FetchLike, check: OAuthAuthority, signal?: AbortSignal, mode: RecoveryMode = "ensure"): Promise<StoredTokens | null> {
     const assert = () => {
-      check(); signal?.throwIfAborted()
-      if (this.state.denied) throw new Error(terminal)
+      this.assertAuthority(); check(); signal?.throwIfAborted()
+      if (this.state.denied) throw new CodingConsentRequired()
       if (!this.state.selectedConfig) throw new Error("Coding session configuration changed; use the current configuration")
     }
     assert()
@@ -156,7 +190,7 @@ export class CodingAuthClient {
   async runPending<T>(call: () => Promise<T>, fetchFn: FetchLike, options: CodingWaitOptions): Promise<T> {
     const epoch = this.state.epoch
     const check = () => {
-      options.check(); options.signal?.throwIfAborted()
+      this.assertAuthority(); options.check(); options.signal?.throwIfAborted()
       if (this.state.epoch !== epoch || this.state.denied || !this.state.selectedConfig) throw new Error("Coding pending call cancelled by credential or configuration change")
     }
     const previous = this.state.calls
@@ -215,7 +249,7 @@ export class CodingAuthClient {
           const error = z.object({ error: z.string() }).safeParse(payload)
           if (error.success && error.data.error === "invalid_grant") {
             this.state.denied = true
-            throw new Error(terminal)
+            throw new CodingConsentRequired()
           }
           if (error.success && error.data.error === "authorization_paused") throw pausedError
           if ([404, 405].includes(response.status)) throw new Error(unsupported)

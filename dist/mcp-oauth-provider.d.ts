@@ -69,6 +69,7 @@ export declare class McpOAuthProvider implements OAuthClientProvider {
     private pendingCodingCredentials;
     private pendingCodingAuthority;
     private codingError;
+    private codingConsentRequested;
     constructor(serverName: string, serverUrl: string, config: McpOAuthConfig, callbacks: McpOAuthCallbacks, storageOptions?: AuthStorageOptions, runtimeSignal?: AbortSignal | undefined, initialState?: string, authority?: OAuthAuthority);
     setAuthFetch(fetchFn: OAuthFetch): void;
     /** Use the same credential-aware fetch in the SDK and transport. */
@@ -76,6 +77,8 @@ export declare class McpOAuthProvider implements OAuthClientProvider {
     private adoptCodingSession;
     getAuthFetch(): OAuthFetch;
     get codingEnrollmentEnabled(): boolean;
+    /** Explicit interactive sign-in only; never serve an old bearer to the SDK. */
+    requestCodingConsent(): void;
     runPendingCodingCall<T>(call: () => Promise<T>, options: CodingWaitOptions): Promise<T>;
     waitForCodingConnectionRenewal(pause: CodingRenewalPause, options: CodingWaitOptions): Promise<void>;
     private get usesClientCredentials();
