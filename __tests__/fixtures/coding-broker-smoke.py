@@ -19,10 +19,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
-gateway = import_module("broker_gateway")
-oauth = import_module("broker_oauth")
-store = import_module("policy_store")
+sys.path.insert(0, str(Path(sys.argv[1]) / "services" / "mcp-broker"))
+gateway = import_module("mcp_broker.broker_gateway")
+oauth = import_module("mcp_broker.broker_oauth")
+store = import_module("mcp_broker.policy_store")
 
 
 def main() -> None:
@@ -74,6 +74,13 @@ def main() -> None:
         async def control(request: Request) -> JSONResponse:
             nonlocal pause_on_call
             action = request.path_params["action"]
+            if action == "revoke":
+                bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+                session = store.authenticate(conn, bearer)
+                if session is None:
+                    return JSONResponse({"error": "invalid_grant"}, status_code=403)
+                store.revoke_session(conn, session["id"])
+                return JSONResponse({"revoked": True})
             if action == "pause-on-call":
                 pause_on_call = True
                 return JSONResponse({"reference": reference})

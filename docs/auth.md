@@ -169,6 +169,9 @@ receiving distinct access, refresh and enrollment credentials in host-session
 memory. Enrollment proofs survive `/reload` for that host, not process exit.
 With an explicit `--mcp-config` launch, resuming or replacing a conversation
 retains the same enrollment instead of enrolling again under its launcher identity.
+A host intentionally starting a new conversation can instead invoke the
+[explicit coding replacement API](coding-session-replacement.md); reconnect,
+reload and resume never invoke it automatically.
 Only the cohort proof is persistent; do not paste it into config, prompts or
 logs. For headless hosts, `settings.oauthCredentialStore: "encrypted-file"`
 selects the existing externally keyed encrypted backend for the cohort proof;
@@ -194,8 +197,9 @@ manually continue with the original tool and arguments (or reconnect / run
 `/mcp-auth broker`); nothing retries in the background.
 Extra capability grants are not transferred to replacement sessions. Logout,
 revocation and cancellation prevent late installation; a revoked launch does
-not fall back to cohort enrollment. Start fresh human consent in a new launch
-for terminal revocation. Local logout leaves the cohort proof for other launches.
+not fall back to cohort enrollment. Explicit interactive sign-in can request
+fresh human consent after terminal revocation; ordinary token reads remain denied.
+Local logout leaves the cohort proof for other launches.
 
 The contract is `POST JSON` to `/broker/coding/enroll` (`cohort_credential`),
 `/broker/coding/status` (`enrollment_token`) and `/broker/coding/replace`

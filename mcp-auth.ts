@@ -50,7 +50,10 @@ type OAuthLifecycleRecord = {
   revocations: number;
 };
 
-const oauthLifecycleRecords = new Map<string, OAuthLifecycleRecord>();
+// Captured providers/fetches can outlive a module reload; their fences must too.
+const OAUTH_LIFECYCLES = Symbol.for('pi-mcp-adapter.oauth-lifecycles.v1');
+const lifecycleHost = globalThis as typeof globalThis & { [OAUTH_LIFECYCLES]?: Map<string, OAuthLifecycleRecord> };
+const oauthLifecycleRecords = lifecycleHost[OAUTH_LIFECYCLES] ??= new Map<string, OAuthLifecycleRecord>();
 
 function getOAuthLifecycleRecord(serverName: string, options: AuthStorageOptions): OAuthLifecycleRecord {
   const scope = options.persistence === 'session'

@@ -1,4 +1,4 @@
-import { getValidToken } from "./mcp-auth-flow.ts";
+import { getValidToken, replaceCodingSession } from "./mcp-auth-flow.ts";
 import {
   inspectAuthForUrl,
   updateTokens,
@@ -7,6 +7,13 @@ import {
 } from "./mcp-auth.ts";
 
 import type { ServerEntry } from "./types.ts";
+
+/**
+ * Host-owned new-conversation boundary. Retire the old remote enrollment in `retire`;
+ * resolve only after cleanup completes. Capture any cleanup credential beforehand.
+ * Failure/cancellation is terminal locally until another explicit replacement.
+ */
+export const replaceMcpCodingSession = replaceCodingSession;
 
 export type McpOAuthTokens = StoredTokens;
 export type McpOAuthStorageOptions = AuthStorageOptions;

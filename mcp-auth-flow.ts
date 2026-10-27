@@ -50,7 +50,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts"
 import { abortable, throwIfAborted } from "./abort.ts"
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts"
 import { authenticateDevice, type DeviceAuthOptions } from "./mcp-device-auth.ts"
-import { getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.ts"
+import { beginCodingSessionReplacement, CodingConsentRequired, getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.ts"
 
 /** Auth status for a server */
 export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
@@ -477,11 +477,23 @@ export async function startAuth(
     throw error instanceof RegistrationRejectedError ? explainRegistrationRejection(error, serverUrl) : error
   }
 
+  const retainedCoding = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions)
+  if (retainedCoding) config.codingEnrollment = retainedCoding
+  let codingConsentRequired = false
   if (config.codingEnrollment) {
-    const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) })
-    authority()
-    throwIfAborted(signal)
-    if (existing) return { authorizationUrl: "" }
+    try {
+      const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) })
+      authority()
+      throwIfAborted(signal)
+      if (existing) return { authorizationUrl: "" }
+    } catch (error) {
+      // Only this explicit sign-in path may request new human consent. Token reads
+      // and reconnect remain terminal and never fall back to a new enrollment.
+      if (!(error instanceof CodingConsentRequired)) throw error
+      codingConsentRequired = true
+      authority()
+      throwIfAborted(signal)
+    }
   }
 
   if (config.grantType === "device_code") {
@@ -602,6 +614,7 @@ export async function startAuth(
       capturedUrl = url
     },
   }, authStorageOptions, runtime.signal, oauthState, authority)
+  if (codingConsentRequired) authProvider.requestCodingConsent()
 
   try {
     const storedAuth = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
@@ -1303,6 +1316,32 @@ export async function removeAuth(serverName: string, options: AuthenticateOption
     console.log(`MCP Auth: Removed credentials for ${serverName}`)
   } finally {
     releaseRevocation()
+  }
+}
+
+/** Host-only deliberate conversation replacement; never called by reconnect or reload. */
+export async function replaceCodingSession(
+  serverName: string,
+  serverUrl: string,
+  options: AuthenticateOptions & { retire: () => Promise<void> },
+): Promise<void> {
+  const runtime = getRuntime(options)
+  const signal = combineAbortSignals(runtime.signal, options.signal)
+  throwIfAborted(signal)
+  const storage = options.authStorageOptions ?? {}
+  captureOAuthAuthority(serverName, true, storage)()
+  // Validate the coding binding before changing any ordinary OAuth authority.
+  const activate = beginCodingSessionReplacement(serverName, serverUrl, storage)
+  const release = beginOAuthRevocation(serverName, storage)
+  try {
+    detachPendingAuthsForServer(serverName, new Error("Authorization cancelled by conversation replacement"))
+    clearAllCredentials(serverName, storage)
+    await options.retire()
+    throwIfAborted(signal)
+    activate()
+  } finally {
+    // Failure/cancellation leaves the replacement denied, never restores old bearers.
+    release()
   }
 }
 
