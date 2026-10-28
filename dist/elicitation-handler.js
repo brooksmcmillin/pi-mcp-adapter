@@ -225,9 +225,7 @@ async function collectField(ui, params, name, schema, current, signal) {
                 selected.add(choice.value);
         }
     }
-    const actions = ["Enter value"];
-    if (schema.default !== undefined)
-        actions.push("Use default");
+    const actions = schema.default === undefined ? ["Enter value"] : ["Use default", "Enter value"];
     if (!required)
         actions.push("Omit");
     const action = await abortable(ui.select(title, actions), signal);
