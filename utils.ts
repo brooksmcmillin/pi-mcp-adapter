@@ -345,6 +345,10 @@ export function sanitizeTerminalText(text: string): string {
     .trim();
 }
 
+export function terminalHyperlink(label: string, url: string): string {
+  return `\u001B]8;;${sanitizeTerminalText(url)}\u001B\\${sanitizeTerminalText(label)}\u001B]8;;\u001B\\`;
+}
+
 export function formatTerminalError(error: unknown): string {
   const messages: string[] = [];
   const seen = new Set<unknown>();

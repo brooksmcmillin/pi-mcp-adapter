@@ -153,6 +153,8 @@ Two calls instead of 26 tools cluttering the context.
 
 If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, and direct tool calls automatically run OAuth when needed and retry once.
 
+Coding authorization renewal prompts show an **Open renewal page** terminal hyperlink with the complete destination embedded, plus the full URL for copying. Opening the link requires terminal support for OSC 8 hyperlinks; use your terminal's link-opening gesture (often Ctrl-click or Cmd-click).
+
 In interactive sessions, you can also authenticate from `/mcp-adapter` with `ctrl+a` or Enter on a server that needs auth. `/mcp-auth` without a server only opens a picker in the interactive UI. For gateway authorization and manual callback completion, see [Remote/headless authentication](https://github.com/nicobailon/pi-mcp-adapter/blob/main/docs/auth.md#remoteheadless-authentication).
 
 On Pi 0.99 and later, servers you already signed in to with Pi's built-in MCP can reuse that sign-in: the adapter asks once per server, and `/mcp-adapter` offers `ctrl+p` to import them. See [Import a sign-in from Pi's built-in MCP](https://github.com/nicobailon/pi-mcp-adapter/blob/main/docs/auth.md#import-a-sign-in-from-pis-built-in-mcp).

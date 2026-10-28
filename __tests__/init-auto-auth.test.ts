@@ -6,6 +6,7 @@ import { McpServerManager } from "../server-manager.ts";
 import { initializeMcp } from "../init.ts";
 import { saveMetadataCache } from "../metadata-cache.ts";
 import { CodingAuthorizationPaused } from "../coding-call-recovery.ts";
+import { Text } from "@earendil-works/pi-tui";
 
 const mocks = vi.hoisted(() => ({
   authenticateServer: vi.fn(),
@@ -166,7 +167,13 @@ describe("startup autoAuth", () => {
     const url = "https://broker.example/broker/coding/renew?authorization_ref=coding_test";
     await prompt("broker", new CodingAuthorizationPaused("coding_test", url), controller.signal, cancel);
     expect(mocks.input).toHaveBeenCalledWith(expect.stringContaining(url), undefined, { signal: controller.signal });
-    expect(mocks.input.mock.calls[0]![0]).toContain("connection resumes automatically");
+    const title = mocks.input.mock.calls[0]![0] as string;
+    const link = `\u001B]8;;${url}\u001B\\Open renewal page\u001B]8;;\u001B\\`;
+    expect(title).toContain(`${link}\n${url}\n`);
+    expect(title).toContain("connection resumes automatically");
+    const lines = new Text(title, 0, 0).render(24);
+    expect(lines.some(line => line.includes(link))).toBe(true);
+    expect(lines.some(line => line.includes(url) && !line.includes("\u001B]8;;"))).toBe(false);
     controller.abort();
     await Promise.resolve();
     expect(cancel).not.toHaveBeenCalled();

@@ -25,7 +25,7 @@ import { McpServerManager, isTransientHttpConnectError, type ServerConnection } 
 import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
-import { formatMcpFooterStatus, formatMcpStatus, openUrl, parallelLimit, providerSignInMessage, sanitizeTerminalText } from "./utils.ts";
+import { formatMcpFooterStatus, formatMcpStatus, openUrl, parallelLimit, providerSignInMessage, sanitizeTerminalText, terminalHyperlink } from "./utils.ts";
 import { logger } from "./logger.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { getAuthStorageOptions } from "./mcp-auth.ts";
@@ -189,7 +189,7 @@ export async function initializeMcp(
         signal.throwIfAborted();
         void ui.input(
           `Renew ${sanitizeTerminalText(serverName)} coding authorization\n\n` +
-            `Open:\n${sanitizeTerminalText(pause.renewalUrl)}\n\n` +
+            `${terminalHyperlink("Open renewal page", pause.renewalUrl)}\n${sanitizeTerminalText(pause.renewalUrl)}\n\n` +
             "Approve a new work period in your browser.\nWaiting up to 5 minutes; connection resumes automatically.\nEscape cancels. No callback URL needed.",
           undefined,
           { signal },

@@ -33,14 +33,10 @@ import { getAuthStorageOptions, inspectAuthForUrl, type AuthStorageOptions } fro
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { findPiSignInImports, importPiSignIn } from "./pi-signin-import.ts";
-import { formatTerminalError, openPath, providerSignInMessage, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
+import { formatTerminalError, openPath, providerSignInMessage, resolveServerUrl, sanitizeTerminalText, terminalHyperlink } from "./utils.ts";
 import { isAbortError } from "./runtime-owner.ts";
 import { resolveJevCredential } from "./jev-key-store.ts";
 import { describeProjectServerBlock, keepProjectServerApprovals } from "./project-server-trust.ts";
-
-function terminalHyperlink(label: string, url: string): string {
-  return `\u001B]8;;${sanitizeTerminalText(url)}\u001B\\${sanitizeTerminalText(label)}\u001B]8;;\u001B\\`;
-}
 
 /**
  * True when this run mode can display a `ctx.ui.custom()` overlay.
