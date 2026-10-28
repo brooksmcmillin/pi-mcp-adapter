@@ -104,9 +104,40 @@ describe("MCP elicitation", () => {
       "MCP Input Request\nServer: github\n\nPlease provide your GitHub username",
       ["Continue", "Decline"],
     ]);
+    expect(ui.select.mock.calls[1][1]).toEqual(["Enter value"]);
     expect(ui.input).toHaveBeenCalledWith("GitHub username (required)", undefined);
     expect(ui.select.mock.calls[2][0]).toContain("GitHub username: octocat");
     expect(result).toEqual({ action: "accept", content: { username: "octocat" } });
+  });
+
+  it.each([
+    { type: "string", defaultValue: "" },
+    { type: "number", defaultValue: 0 },
+    { type: "integer", defaultValue: 3600 },
+  ] as const)("offers the $type default first without opening input", async ({ type, defaultValue }) => {
+    const { handleElicitationRequest } = await import("../elicitation-handler.ts");
+    const ui = createUi({
+      select: vi.fn()
+        .mockResolvedValueOnce("Continue")
+        .mockImplementationOnce(async (_title, actions) => actions[0])
+        .mockResolvedValueOnce("Submit"),
+    });
+
+    const result = await handleElicitationRequest(
+      { serverName: "demo", ui, allowUrl: true },
+      request({
+        mode: "form",
+        message: "Choose a value",
+        requestedSchema: {
+          type: "object",
+          properties: { value: { type, default: defaultValue } },
+        },
+      }),
+    );
+
+    expect(ui.select.mock.calls[1][1]).toEqual(["Use default", "Enter value", "Omit"]);
+    expect(ui.input).not.toHaveBeenCalled();
+    expect(result).toEqual({ action: "accept", content: { value: defaultValue } });
   });
 
   it("lets the user edit a value from the review screen", async () => {
