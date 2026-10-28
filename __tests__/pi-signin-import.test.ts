@@ -127,6 +127,25 @@ describe("importing sign-ins from Pi's built-in MCP", () => {
     await connection.client.close();
   });
 
+  it("checks for sign-in imports without loading the OAuth runtime", async () => {
+    vi.doMock("../mcp-auth-flow.ts", () => {
+      throw new Error("Sign-in discovery must not load the OAuth runtime");
+    });
+    try {
+      writePiAuth({});
+      const { offerPiSignInImports } = await loadModules();
+      const ctx = createCtx(IMPORT);
+
+      await offerPiSignInImports(ctx, {
+        mcpServers: { docs: { url: "https://docs.example/mcp", auth: "oauth" } },
+      });
+
+      expect(ctx.ui.select).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("../mcp-auth-flow.ts");
+    }
+  });
+
   it("never offers a sign-in stored for a different URL", async () => {
     writePiAuth({ "https://docs.example/other": piEntry("https://docs.example/other") });
     const { offerPiSignInImports, findPiSignInImports, getAuthForUrl } = await loadModules();

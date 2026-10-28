@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { McpConfig, McpToolAnnotations, ServerEntry } from "./types.ts";
+/** Check whether an HTTP server configuration permits OAuth. */
+export declare function supportsOAuth(definition: ServerEntry): boolean;
 export declare function stripUtf8Bom(raw: string): string;
 export declare function parseJsonWithComments(raw: string): unknown;
 /** Resolve a candidate only when its real path stays within the real root. */

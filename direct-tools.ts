@@ -11,8 +11,8 @@ import { resolveMcpResultContent, transformMcpResourceContents } from "./tool-re
 import { guardMcpOutput, guardMcpText, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
 import { maybeStartUiSession, summarizeUiSessionResult, type UiSessionRuntime } from "./ui-session.ts";
 import { isServerDisabled } from "./types.ts";
-import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
-import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl, withToolCallIdMeta } from "./utils.ts";
+import { authenticate } from "./mcp-auth-flow.ts";
+import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl, supportsOAuth, withToolCallIdMeta } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
 import { callToolOn, type StartedTask } from "./mcp-tasks.ts";

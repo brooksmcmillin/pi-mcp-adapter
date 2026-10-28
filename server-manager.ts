@@ -49,7 +49,7 @@ import { logger } from "./logger.ts";
 import { RESOURCE_MIME_TYPE } from "./ui-app-bridge-helpers.ts";
 import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
-import { explainRegistrationRejection, extractOAuthConfig, supportsOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
+import { explainRegistrationRejection, extractOAuthConfig, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import {
   captureOAuthAuthority,
   inspectAuthForUrl,
@@ -79,6 +79,7 @@ import {
   resolveCommandSecretsRecord,
   resolveConfigPath,
   resolveServerUrl,
+  supportsOAuth,
 } from "./utils.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";

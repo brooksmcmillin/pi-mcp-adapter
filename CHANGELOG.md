@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Startup no longer loads the OAuth runtime just to check whether Pi sign-ins can be imported. OAuth eligibility and authentication behavior are unchanged.
+
 ## [7.0.0] - 2026-10-25
 
 ### Highlights

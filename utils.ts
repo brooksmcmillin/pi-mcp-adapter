@@ -6,6 +6,16 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node
 import stripJsonComments from "strip-json-comments";
 import type { McpConfig, McpToolAnnotations, ServerEntry } from "./types.ts";
 
+/** Check whether an HTTP server configuration permits OAuth. */
+export function supportsOAuth(definition: ServerEntry): boolean {
+  if (!definition.url) return false;
+  if (definition.auth === false || definition.oauth === false) return false;
+  if (definition.auth === "oauth") return true;
+  // Custom headers take precedence over implicit OAuth detection.
+  if (definition.headers && Object.keys(definition.headers).length > 0) return false;
+  return definition.auth === undefined;
+}
+
 export function stripUtf8Bom(raw: string): string {
   return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
 }

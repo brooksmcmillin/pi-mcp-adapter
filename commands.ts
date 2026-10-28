@@ -28,12 +28,12 @@ import { markKeepAliveAfterConnect, notifyToolMetadataUpdated, updateMetadataCac
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { loadMetadataCache, reconstructPromptMetadata, withSessionMetadata } from "./metadata-cache.ts";
 import { buildToolMetadata, cacheReader, executorAppToolsLine, executorAppToolsStatus, executorCatalogNotes, ownTools } from "./tool-metadata.ts";
-import { supportsOAuth, authenticate, removeAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
+import { authenticate, removeAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { getAuthStorageOptions, inspectAuthForUrl } from "./mcp-auth.ts";
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { findPiSignInImports, importPiSignIn } from "./pi-signin-import.ts";
-import { formatTerminalError, openPath, providerSignInMessage, resolveServerUrl, sanitizeTerminalText, terminalHyperlink } from "./utils.ts";
+import { formatTerminalError, openPath, providerSignInMessage, resolveServerUrl, sanitizeTerminalText, supportsOAuth, terminalHyperlink } from "./utils.ts";
 import { isAbortError } from "./runtime-owner.ts";
 import { classifierRegistryOf, resolveSemanticClassifier, SEMANTIC_SEARCH_UNAVAILABLE } from "./semantic-search.ts";
 import { describeProjectServerBlock, keepProjectServerApprovals } from "./project-server-trust.ts";

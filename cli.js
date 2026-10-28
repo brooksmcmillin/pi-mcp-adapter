@@ -500,14 +500,13 @@ async function runDoctor(argv, log, error) {
     error("Usage: pi-mcp-adapter doctor [--json]");
     return 1;
   }
-  let config, trust, manager, auth, authFlow, utils, agentDir, types;
+  let config, trust, manager, auth, utils, agentDir, types;
   try {
-    [config, trust, manager, auth, authFlow, utils, agentDir, types] = await Promise.all([
+    [config, trust, manager, auth, utils, agentDir, types] = await Promise.all([
       import("./dist/config.js"),
       import("./dist/project-server-trust.js"),
       import("./dist/server-manager.js"),
       import("./dist/mcp-auth.js"),
-      import("./dist/mcp-auth-flow.js"),
       import("./dist/utils.js"),
       import("./dist/agent-dir.js"),
       import("./dist/types.js"),
@@ -574,7 +573,7 @@ async function runDoctor(argv, log, error) {
         return { state: "failed", message: missing.length > 0 ? `URL uses unset environment variables: ${missing.join(", ")}` : "URL is invalid" };
       }
       // Report a missing sign-in from stored credentials instead of starting OAuth.
-      if (authFlow.supportsOAuth(definition)) {
+      if (utils.supportsOAuth(definition)) {
         const stored = auth.inspectAuthForUrl(name, url, authOptions);
         if (stored.status === "unavailable") return { state: "failed", message: stored.message };
         // A record without tokens is an unfinished sign-in.

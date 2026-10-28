@@ -18,7 +18,6 @@ type CustomArgs = Parameters<ExtensionContext["ui"]["custom"]>;
 vi.mock("../mcp-auth-flow.ts", () => ({
   authenticate: mocks.authenticate,
   removeAuth: mocks.removeAuth,
-  supportsOAuth: (definition: { url?: string; auth?: string }) => Boolean(definition.url) && definition.auth !== "bearer",
 }));
 
 vi.mock("../mcp-panel.ts", () => ({
