@@ -36,6 +36,7 @@ export declare function resolveBearerToken(definition: Pick<ServerEntry, "bearer
 /** Remove OSC control strings, including payloads that have no terminator. */
 export declare function stripOscSequences(text: string): string;
 export declare function sanitizeTerminalText(text: string): string;
+export declare function terminalHyperlink(label: string, url: string): string;
 export declare function formatTerminalError(error: unknown): string;
 export declare function truncateAtWord(text: string, target: number): string;
 /** Request `_meta` key that lets MCP servers correlate a call with the Pi tool call that made it. */
