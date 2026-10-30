@@ -670,7 +670,7 @@ export function getAuthStorageOptions(
   cwd = process.cwd(),
   persistence: unknown = undefined,
   oauthCredentialStore: unknown = undefined,
-  sessionOwner?: object,
+  sessionOwner?: object, // eslint-disable-line anti-slop/no-object-parameters -- Identity-only weak key; no properties are read.
   launchConfigPath?: string,
 ): AuthStorageOptions {
   if (persistence !== undefined && persistence !== 'persistent' && persistence !== 'session') {

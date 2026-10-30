@@ -6,6 +6,16 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node
 import stripJsonComments from "strip-json-comments";
 import type { McpConfig, McpToolAnnotations, ServerEntry } from "./types.ts";
 
+/** Check whether an HTTP server configuration permits OAuth. */
+export function supportsOAuth(definition: ServerEntry): boolean {
+  if (!definition.url) return false;
+  if (definition.auth === false || definition.oauth === false) return false;
+  if (definition.auth === "oauth") return true;
+  // Custom headers take precedence over implicit OAuth detection.
+  if (definition.headers && Object.keys(definition.headers).length > 0) return false;
+  return definition.auth === undefined;
+}
+
 export function stripUtf8Bom(raw: string): string {
   return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
 }
@@ -137,16 +147,17 @@ export function interpolateEnvVars(value: string): string;
 export function interpolateEnvVars(value: string, environment: NodeJS.ProcessEnv): string;
 export function interpolateEnvVars(value: string, environment: NodeJS.ProcessEnv = process.env): string {
   return value
-    .replace(/\$\{(\w+)\}/g, (_, name) => environment[name] ?? "")
+    // `${NAME:-default}` uses the default only when NAME is unset, as Claude Code does.
+    .replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, fallback: string | undefined) => environment[name] ?? fallback ?? "")
     .replace(/\$env:(\w+)/g, (_, name) => environment[name] ?? "")
     .replace(/\{env:(\w+)\}/g, (_, name) => environment[name] ?? "");
 }
 
 export function getMissingEnvVars(value: string, environment: NodeJS.ProcessEnv = process.env): string[] {
   const missing = new Set<string>();
-  for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
-    const name = match[1] ?? match[2] ?? match[3];
-    if (name && environment[name] === undefined) {
+  for (const match of value.matchAll(/\$\{(\w+)(:-[^}]*)?\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
+    const name = match[1] ?? match[3] ?? match[4];
+    if (name && match[2] === undefined && environment[name] === undefined) {
       missing.add(name);
     }
   }
@@ -345,6 +356,7 @@ export function sanitizeTerminalText(text: string): string {
     .trim();
 }
 
+/** Keep the full destination clickable when Pi wraps the visible label. */
 export function terminalHyperlink(label: string, url: string): string {
   return `\u001B]8;;${sanitizeTerminalText(url)}\u001B\\${sanitizeTerminalText(label)}\u001B]8;;\u001B\\`;
 }

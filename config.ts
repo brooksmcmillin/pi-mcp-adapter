@@ -9,9 +9,11 @@ import { getAgentPluginSummaries, loadAgentPluginConfigs, type AgentPluginSummar
 import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPluginEntries } from "./agent-plugin-provenance.ts";
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
-import { validateJevSettings } from "./jev-client.ts";
-import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type OAuthConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
-import { getMissingEnvVars, parseJsonWithComments, providerAuthUrlError, stripUtf8Bom, toStringRecord } from "./utils.ts";
+import { validateExtractionSettings } from "./extraction-settings.ts";
+import { validateSemanticSearchSettings } from "./semantic-settings.ts";
+import { parseScriptTools } from "./script-tools.ts";
+import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type OAuthConfig, type ServerEntry, type McpSettings, type ImportKind, type ScriptToolDefinition, type ServerProvenance } from "./types.ts";
+import { interpolateEnvVars, parseJsonWithComments, providerAuthUrlError, stripUtf8Bom, toStringRecord } from "./utils.ts";
 
 const GENERIC_GLOBAL_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
 const AGENTS_GLOBAL_CONFIG_PATHS = [
@@ -275,7 +277,31 @@ export function getLegacyMcpMigrationNotices(cwd = process.cwd(), overridePath?:
     ...getPiMcpConfigNotices(cwd, overridePath),
     ...getOpenCodeImportNotices(cwd, overridePath),
     ...getDroppedCredentialNotices(cwd, overridePath),
+    ...getRemovedSettingNotices(cwd, overridePath),
   ];
+}
+
+/** Settings that only configured mcpScript. They still load, and do nothing. */
+const REMOVED_SCRIPT_SETTINGS = ["scriptMode", "scriptSkill"] as const;
+
+/** Notices for each config file that still sets settings that now do nothing: mcpScript's, and `settings.jev`. */
+function getRemovedSettingNotices(cwd: string, overridePath?: string): string[] {
+  return getConfigSources(overridePath, cwd).flatMap((source) => {
+    const settings = readSourceConfig(source.id, source.readPath)?.settings as Record<string, unknown> | undefined;
+    if (!settings) return [];
+    const notices: string[] = [];
+    const keys = REMOVED_SCRIPT_SETTINGS.filter((key) => settings[key] !== undefined).map((key) => `settings.${key}`);
+    if (keys.length > 0) {
+      const [verb, pronoun] = keys.length === 1 ? ["does", "it"] : ["do", "them"];
+      notices.push(`${source.readPath}: pi-mcp-adapter no longer has mcpScript, so ${keys.join(" and ")} ${verb} nothing. Remove ${pronoun}, and add "+codemode" to defaultTools in Pi's settings to script MCP calls with Pi's codemode.`);
+    }
+    if (settings.jev === false) {
+      notices.push(`${source.readPath}: settings.jev was replaced by settings.semanticSearch, and settings.jev: false no longer turns semantic search off. Set settings.semanticSearch to false to keep it off.`);
+    } else if (settings.jev !== undefined) {
+      notices.push(`${source.readPath}: settings.jev was replaced by settings.semanticSearch, and semantic search now uses Pi's classifier models instead of a System One key. Move allowedServers there (semanticCandidateLimit is now candidateLimit and semanticMinProbability is minProbability), or run /mcp-adapter semantic setup.`);
+    }
+    return notices;
+  });
 }
 
 /** server name -> credential field -> the file that supplied it. */
@@ -548,6 +574,13 @@ export interface ProjectServerSource {
 export interface LoadedMcpConfig {
   config: McpConfig;
   projectServers: Map<string, ProjectServerSource>;
+  /** Script tools whose entry came from a project config file, by name. Always set by loadMcpConfigWithSources. */
+  projectScriptTools?: Map<string, ProjectServerSource>;
+  /**
+   * One line per script tool a config file defines but the adapter did not load, with the reason.
+   * Kept apart from the migration notices, which also reach `mcp({})`. Always set by loadMcpConfigWithSources.
+   */
+  scriptToolIssues?: string[];
   projectServerPolicy: "ask" | "allow";
 }
 
@@ -568,7 +601,7 @@ export const MCP_CONFIG_SOURCE_METADATA = Symbol.for("pi-mcp-adapter/config-sour
 export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
   const loaded = loadMcpConfigWithSources(overridePath, cwd);
   Object.defineProperty(loaded.config, MCP_CONFIG_SOURCE_METADATA, {
-    value: { projectServers: loaded.projectServers, projectServerPolicy: loaded.projectServerPolicy },
+    value: { projectServers: loaded.projectServers, projectScriptTools: loaded.projectScriptTools, scriptToolIssues: loaded.scriptToolIssues, projectServerPolicy: loaded.projectServerPolicy },
     enumerable: false,
   });
   return loaded.config;
@@ -578,6 +611,8 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
   const sourceSpecs = getConfigSources(overridePath, cwd);
   const hostConfigDiscovery = getConfiguredHostConfigDiscovery(overridePath, cwd);
   const projectServers = new Map<string, ProjectServerSource>();
+  const projectScriptTools = new Map<string, ProjectServerSource>();
+  const scriptToolIssues: string[] = [];
   let projectServerPolicy: "ask" | "allow" = "ask";
   let projectAgentPluginSource: ProjectServerSource | undefined;
   let projectClaudePluginSource: ProjectServerSource | undefined;
@@ -598,6 +633,8 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
   for (const source of sourceSpecs) {
     const loaded = readSourceConfig(source.id, source.readPath);
     if (!loaded) continue;
+    // Read here, because expandImports and mergeConfigs keep only the config's own keys.
+    scriptToolIssues.push(...loaded.scriptToolIssues ?? []);
     // Pi replaces a global entry that the project file redefines; mergeServerMaps would merge fields.
     if (source.id === "pi-mcp-global") {
       for (const name of piProjectNames) delete loaded.mcpServers[name];
@@ -625,11 +662,16 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
     for (const [name, importedSource] of expandedImport.serverSources) {
       if (importedSource.scope === "project") projectServers.set(name, { path: importedSource.path });
     }
+    // A later file's entry replaces the whole entry, so the file that set it last decides its scope.
+    for (const name of Object.keys(expanded.scriptTools ?? {})) {
+      if (source.scope === "project") projectScriptTools.set(name, sourceRef);
+      else projectScriptTools.delete(name);
+    }
     config = mergeConfigs(config, expanded);
   }
 
   if (isExclusiveConfigMode()) {
-    return { config: stripProjectProviderAuth(resolveConfiguredClaudePluginMcp(config, cwd), projectServers), projectServers, projectServerPolicy };
+    return { config: stripProjectProviderAuth(resolveConfiguredClaudePluginMcp(config, cwd), projectServers), projectServers, projectScriptTools, scriptToolIssues, projectServerPolicy };
   }
 
   const packageConfig = loadPackageMcpConfigs(cwd);
@@ -656,6 +698,8 @@ export function loadMcpConfigWithSources(overridePath?: string, cwd = process.cw
   return {
     config: stripProjectProviderAuth(mergedConfig, projectServers),
     projectServers,
+    projectScriptTools,
+    scriptToolIssues,
     projectServerPolicy,
   };
 }
@@ -710,12 +754,9 @@ function applySettingDefaults(config: McpConfig): McpConfig {
 }
 
 function getMergedSettings(overridePath?: string, cwd = process.cwd()): McpSettings | undefined {
-  let settings: McpSettings | undefined;
-  for (const source of getConfigSources(overridePath, cwd)) {
-    const loaded = readSourceConfig(source.id, source.readPath);
-    if (loaded?.settings) settings = { ...settings, ...loaded.settings };
-  }
-  return settings;
+  const sources = getConfigSources(overridePath, cwd).flatMap((source) => readSourceConfig(source.id, source.readPath)?.settings ?? []);
+  // Later files win; fromEntries keeps a "__proto__" key as data, as a spread would.
+  return sources.length > 0 ? Object.fromEntries(sources.flatMap((settings) => Object.entries(settings))) as McpSettings : undefined;
 }
 
 function getConfiguredHostConfigDiscovery(overridePath?: string, cwd = process.cwd()): HostConfigDiscovery {
@@ -1002,7 +1043,7 @@ function getAncestorProjectDirs(cwd: string, root: string): string[] {
   return dirs;
 }
 
-function isExclusiveConfigMode(): boolean {
+export function isExclusiveConfigMode(): boolean {
   return process.env.PI_MCP_CONFIG_MODE?.trim().toLowerCase() === "exclusive";
 }
 
@@ -1010,11 +1051,14 @@ function mergeConfigs(base: McpConfig, next: McpConfig): McpConfig {
   const imports = mergeImports(base.imports, next.imports);
   const settings = next.settings ? { ...base.settings, ...next.settings } : base.settings;
   const claudePlugins = next.claudePlugins ?? base.claudePlugins;
+  // A later file's script tool replaces a same-named one whole, never field by field.
+  const scriptTools = next.scriptTools ? { ...base.scriptTools, ...next.scriptTools } : base.scriptTools;
   return {
     mcpServers: mergeServerMaps(base.mcpServers, next.mcpServers),
     ...(imports !== undefined ? { imports } : {}),
     ...(settings !== undefined ? { settings } : {}),
     ...(claudePlugins !== undefined ? { claudePlugins } : {}),
+    ...(scriptTools !== undefined ? { scriptTools } : {}),
   };
 }
 
@@ -1129,6 +1173,7 @@ function expandImports(config: McpConfig, cwd = process.cwd()): LoadedHostConfig
       imports: config.imports,
       ...(config.settings !== undefined ? { settings: config.settings } : {}),
       ...(config.claudePlugins !== undefined ? { claudePlugins: config.claudePlugins } : {}),
+      ...(config.scriptTools !== undefined ? { scriptTools: config.scriptTools } : {}),
       mcpServers: mergeServerMaps(importedServers, config.mcpServers),
     },
     serverSources,
@@ -1273,13 +1318,13 @@ function resolveImportPath(importKind: ImportKind, cwd = process.cwd()): string 
   return loadImportedConfig(importKind, cwd, `Failed to discover imported MCP config from ${importKind}:`)?.path ?? null;
 }
 
-function readValidatedConfig(path: string, label: string): McpConfig | null {
+function readValidatedConfig(path: string, label: string): ValidatedConfig | null {
   if (!existsSync(path)) return null;
 
   try {
     const text = readFileSync(path, "utf-8");
     if (stripJsonComments(text, { trailingCommas: true }).trim() === "") return null;
-    return validateConfig(parseJsonWithComments(text));
+    return validateConfig(parseJsonWithComments(text), path);
   } catch (error) {
     console.warn(`Failed to load ${label}:`, error);
     return null;
@@ -1290,7 +1335,7 @@ function isPiMcpSource(id: ConfigSourceSpec["id"]): boolean {
   return id === "pi-mcp-global" || id === "pi-mcp-project";
 }
 
-function readSourceConfig(id: ConfigSourceSpec["id"], path: string): (McpConfig & { ignoredSettings?: Map<string, string[]> }) | null {
+function readSourceConfig(id: ConfigSourceSpec["id"], path: string): (ValidatedConfig & { ignoredSettings?: Map<string, string[]> }) | null {
   return isPiMcpSource(id) ? readPiMcpConfig(path) : readValidatedConfig(path, `MCP config from ${path}`);
 }
 
@@ -1322,7 +1367,7 @@ function readPiMcpConfig(path: string): PiMcpConfigFile | null {
   }
   const file: PiMcpConfigFile = {
     mcpServers: {},
-    adapterKeys: ["settings", "imports", "claudePlugins", "mcp-servers"].filter((key) => raw[key] !== undefined),
+    adapterKeys: ["settings", "imports", "claudePlugins", "scriptTools", "mcp-servers"].filter((key) => raw[key] !== undefined),
     skipped: [],
     ignoredSettings: new Map(),
   };
@@ -1439,26 +1484,37 @@ function translatePiOAuth(oauth: unknown): { oauth: OAuthConfig; ignored: string
   return { oauth: result, ignored: Object.keys(unknown).map((key) => `oauth.${key}`) };
 }
 
-function validateConfig(raw: unknown): McpConfig {
+/** A config file as read, with the reasons any of its script tools were not loaded. */
+type ValidatedConfig = McpConfig & { scriptToolIssues?: string[] };
+
+/**
+ * `sourcePath` is the config file's own path. Only a file read from a path has script tools,
+ * because their relative `file` paths resolve against it; Claude plugin configs have none.
+ */
+function validateConfig(raw: unknown, sourcePath?: string): ValidatedConfig {
   if (!isRecord(raw)) {
     return { mcpServers: {} };
   }
 
+  const parsedScriptTools = sourcePath !== undefined && raw.scriptTools !== undefined
+    ? parseScriptTools(raw.scriptTools, sourcePath)
+    : undefined;
+  const hasScriptTools = parsedScriptTools !== undefined && Object.keys(parsedScriptTools.scriptTools).length > 0;
   return {
     mcpServers: toServerEntries(raw.mcpServers ?? raw["mcp-servers"]),
     ...(Array.isArray(raw.imports) ? { imports: raw.imports as ImportKind[] } : {}),
     ...(raw.settings !== undefined ? { settings: parseSettings(raw.settings) } : {}),
     ...(raw.claudePlugins !== undefined ? { claudePlugins: parseClaudePlugins(raw.claudePlugins) } : {}),
+    ...(hasScriptTools ? { scriptTools: parsedScriptTools.scriptTools } : {}),
+    ...(parsedScriptTools?.issues.length ? { scriptToolIssues: parsedScriptTools.issues } : {}),
   };
 }
 
 function parseSettings(value: unknown): McpSettings {
   if (!isRecord(value)) throw new Error("settings must be an object");
   const settings = { ...value } as McpSettings;
-  if (value.jev !== undefined) {
-    validateJevSettings(value.jev);
-    settings.jev = value.jev as NonNullable<McpSettings["jev"]>;
-  }
+  if (value.semanticSearch !== undefined) validateSemanticSearchSettings(value.semanticSearch);
+  if (value.extraction !== undefined) validateExtractionSettings(value.extraction);
   return settings;
 }
 
@@ -1502,7 +1558,7 @@ function toServerEntries(servers: unknown): Record<string, ServerEntry> {
       const error = typeof provider !== "string" || !provider ? "auth.provider must be a provider name"
         : typeof entry.url !== "string" ? "auth.provider requires a url"
         // A URL with env references is checked once resolved, when it connects.
-        : getMissingEnvVars(entry.url, {}).length > 0 ? undefined
+        : interpolateEnvVars(entry.url, {}) !== entry.url ? undefined
         : providerAuthUrlError(entry.url);
       if (error) {
         console.warn(`Ignoring MCP server "${name}": ${error}`);
@@ -1725,11 +1781,20 @@ function serializeRawConfig(raw: Record<string, unknown>): string {
   return `${JSON.stringify(raw, null, 2)}\n`;
 }
 
-function buildUnifiedDiff(beforeText: string, afterText: string): string {
+/**
+ * A line diff of two texts. By default every line is listed; with `context`, only changed lines and
+ * that many lines around them, in `@@` hunks.
+ */
+export function buildUnifiedDiff(beforeText: string, afterText: string, options: { context?: number } = {}): string {
   if (beforeText === afterText) return "(no changes)";
 
-  const before = beforeText.split("\n");
-  const after = afterText.split("\n");
+  // With context, lines are counted as in `diff -u`: a final newline ends a line rather than starting
+  // a blank one, so an empty text has no lines.
+  const split = (text: string) => options.context !== undefined && (text === "" || text.endsWith("\n"))
+    ? text.split("\n").slice(0, -1)
+    : text.split("\n");
+  const before = split(beforeText);
+  const after = split(afterText);
   const rows = before.length;
   const cols = after.length;
   const lcs = Array.from({ length: rows + 1 }, () => Array<number>(cols + 1).fill(0));
@@ -1745,7 +1810,7 @@ function buildUnifiedDiff(beforeText: string, afterText: string): string {
     }
   }
 
-  const lines: string[] = ["--- before", "+++ after"];
+  const lines: string[] = [];
   let i = 0;
   let j = 0;
   while (i < rows || j < cols) {
@@ -1766,14 +1831,51 @@ function buildUnifiedDiff(beforeText: string, afterText: string): string {
     }
   }
 
-  return lines.join("\n");
+  const body = options.context === undefined ? lines : contextHunks(lines, options.context);
+  // The texts differ, so with no changed line only the final newline was added or removed.
+  if (body.length === 0) body.push("(only the final newline differs)");
+  return ["--- before", "+++ after", ...body].join("\n");
+}
+
+// Removals come before additions within each run of changes, as in `diff -u`.
+function contextHunks(lines: readonly string[], context: number): string[] {
+  const ordered: string[] = [];
+  for (let k = 0; k < lines.length;) {
+    if (lines[k]!.startsWith(" ")) {
+      ordered.push(lines[k++]!);
+      continue;
+    }
+    const run: string[] = [];
+    while (k < lines.length && !lines[k]!.startsWith(" ")) run.push(lines[k++]!);
+    // Loops, not push(...run): a spread past about 100,000 arguments throws RangeError.
+    for (const line of run) if (line.startsWith("-")) ordered.push(line);
+    for (const line of run) if (line.startsWith("+")) ordered.push(line);
+  }
+  const changed = ordered.flatMap((line, index) => line.startsWith(" ") ? [] : [index]);
+  const hunks: string[] = [];
+  // Line numbers of ordered[cursor] in the before and after texts.
+  let cursor = 0;
+  let beforeLine = 1;
+  let afterLine = 1;
+  for (let k = 0; k < changed.length; k++) {
+    const start = Math.max(0, changed[k]! - context);
+    while (k + 1 < changed.length && changed[k + 1]! - changed[k]! - 1 <= 2 * context) k++;
+    const end = Math.min(ordered.length, changed[k]! + context + 1);
+    for (; cursor < start; cursor++) {
+      if (!ordered[cursor]!.startsWith("+")) beforeLine++;
+      if (!ordered[cursor]!.startsWith("-")) afterLine++;
+    }
+    const hunk = ordered.slice(start, end);
+    const beforeCount = hunk.filter((line) => !line.startsWith("+")).length;
+    const afterCount = hunk.filter((line) => !line.startsWith("-")).length;
+    hunks.push(`@@ -${beforeCount === 0 ? beforeLine - 1 : beforeLine},${beforeCount} +${afterCount === 0 ? afterLine - 1 : afterLine},${afterCount} @@`);
+    for (const line of hunk) hunks.push(line);
+  }
+  return hunks;
 }
 
 function buildConfigWritePreview(filePath: string, nextRaw: Record<string, unknown>): ConfigWritePreview {
-  const existed = existsSync(filePath);
-  const beforeRaw = readRawConfigObject(filePath);
-  const beforeText = existed ? serializeRawConfig(beforeRaw) : "";
-  const afterText = serializeRawConfig(nextRaw);
+  const { existed, beforeText, afterText } = configWriteTexts(filePath, nextRaw);
   return {
     path: filePath,
     existed,
@@ -1782,6 +1884,14 @@ function buildConfigWritePreview(filePath: string, nextRaw: Record<string, unkno
     afterText,
     diffText: buildUnifiedDiff(beforeText, afterText),
   };
+}
+
+function configWriteTexts(filePath: string, nextRaw: Record<string, unknown>): Pick<ConfigWritePreview, "existed" | "beforeText" | "afterText"> {
+  const existed = existsSync(filePath);
+  const beforeRaw = readRawConfigObject(filePath);
+  const beforeText = existed ? serializeRawConfig(beforeRaw) : "";
+  const afterText = serializeRawConfig(nextRaw);
+  return { existed, beforeText, afterText };
 }
 
 function readRawConfigObject(filePath: string): Record<string, unknown> {
@@ -1831,28 +1941,31 @@ export function writeSharedConfigText(filePath: string, text: string): void {
   writeConfigText(filePath, text);
 }
 
-export function writeJevSemanticSearchConfig(
+export function writeSemanticSearchConfig(
   overridePath: string | undefined,
   cwd: string,
   allowedServers: string[],
-  effectiveJev?: unknown,
+  effectiveSettings?: unknown,
 ): { path: string; changed: boolean } {
   const filePath = overridePath ? getPiGlobalConfigPath(overridePath) : getProjectPiConfigPath(cwd);
   const raw = readRawConfigObject(filePath);
   if (raw.settings !== undefined && !isRecord(raw.settings)) {
-    throw new Error(`Failed to update Jev settings at ${filePath}: settings must be an object`);
+    throw new Error(`Failed to update semantic search settings at ${filePath}: settings must be an object`);
   }
   const settings = raw.settings as Record<string, unknown> | undefined;
-  const currentJev = settings?.jev;
-  if (currentJev !== undefined && currentJev !== false && !isRecord(currentJev)) {
-    throw new Error(`Failed to update Jev settings at ${filePath}: settings.jev must be an object or false`);
+  const current = settings?.semanticSearch;
+  if (current !== undefined && current !== false && !isRecord(current)) {
+    throw new Error(`Failed to update semantic search settings at ${filePath}: settings.semanticSearch must be an object or false`);
   }
-  const jev = isRecord(effectiveJev) ? effectiveJev : isRecord(currentJev) ? currentJev : {};
-  const nextServers = [...new Set(allowedServers)].sort((a, b) => a.localeCompare(b));
-  const nextJev = { ...jev, semanticSearch: true, allowedServers: nextServers };
-  validateJevSettings(nextJev);
-  if (isRecord(currentJev) && JSON.stringify(currentJev) === JSON.stringify(nextJev)) return { path: filePath, changed: false };
-  raw.settings = { ...settings, jev: nextJev };
+  // The effective settings may come from a lower-precedence file; writing them keeps this file's policy complete.
+  const source = isRecord(effectiveSettings) ? effectiveSettings : isRecord(current) ? current : {};
+  const next = { ...source, allowedServers: [...new Set(allowedServers)].sort((a, b) => a.localeCompare(b)) };
+  validateSemanticSearchSettings(next);
+  if (isRecord(current) && JSON.stringify(current) === JSON.stringify(next) && settings?.jev === undefined) return { path: filePath, changed: false };
+  // Setup is the migration path off settings.jev, so the file it writes stops repeating that notice.
+  const nextSettings: Record<string, unknown> = { ...settings, semanticSearch: next };
+  delete nextSettings.jev;
+  raw.settings = nextSettings;
   writeRawConfigObject(filePath, raw);
   return { path: filePath, changed: true };
 }
@@ -2083,6 +2196,36 @@ export function writeSharedServerEntry(filePath: string, serverName: string, ent
   const servers = getServersObject(raw, filePath);
   servers[serverName] = entry;
   setServersObject(raw, servers);
+  writeRawConfigObject(filePath, raw);
+  return filePath;
+}
+
+function getScriptToolsObject(raw: Record<string, unknown>, filePath: string): Record<string, ScriptToolDefinition> {
+  if (Object.hasOwn(raw, "scriptTools") && !isRecord(raw.scriptTools)) {
+    throw new Error(`Failed to update MCP config at ${filePath}: scriptTools must be an object`);
+  }
+  return (raw.scriptTools ?? {}) as Record<string, ScriptToolDefinition>;
+}
+
+/** The file's text before and after the entry is written, for a diff the caller bounds. */
+export function previewScriptToolEntryTexts(filePath: string, name: string, entry: ScriptToolDefinition): Pick<ConfigWritePreview, "existed" | "beforeText" | "afterText"> {
+  return configWriteTexts(filePath, withScriptToolEntry(filePath, name, entry));
+}
+
+/** The file's `scriptTools` entry for `name` as written, or undefined when it has none. */
+export function readScriptToolEntry(filePath: string, name: string): unknown {
+  const scriptTools = getScriptToolsObject(readRawConfigObject(filePath), filePath);
+  return Object.hasOwn(scriptTools, name) ? scriptTools[name] : undefined;
+}
+
+function withScriptToolEntry(filePath: string, name: string, entry: ScriptToolDefinition): Record<string, unknown> {
+  const raw = readRawConfigObject(filePath);
+  return { ...raw, scriptTools: { ...getScriptToolsObject(raw, filePath), [name]: entry } };
+}
+
+export function writeScriptToolEntry(filePath: string, name: string, entry: ScriptToolDefinition): string {
+  const raw = readRawConfigObject(filePath);
+  raw.scriptTools = { ...getScriptToolsObject(raw, filePath), [name]: entry };
   writeRawConfigObject(filePath, raw);
   return filePath;
 }

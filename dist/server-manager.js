@@ -15,15 +15,15 @@ import { RESOURCE_MIME_TYPE } from "./ui-app-bridge-helpers.js";
 import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { McpOAuthProvider } from "./mcp-oauth-provider.js";
 import { CodingAuthorizationPaused, CodingCredentialPaused } from "./coding-call-recovery.js";
-import { explainRegistrationRejection, extractOAuthConfig, supportsOAuth } from "./mcp-auth-flow.js";
+import { explainRegistrationRejection, extractOAuthConfig } from "./mcp-auth-flow.js";
 import { captureOAuthAuthority, inspectAuthForUrl, invalidateAuthEntryCache, } from "./mcp-auth.js";
 import { getBearerTokenForUrl } from "./mcp-bearer-store.js";
 import { handleSamplingRequest, registerSamplingHandler } from "./sampling-handler.js";
 import { appendServerLogMessage } from "./server-log.js";
 import { getAgentPath } from "./agent-dir.js";
-import { handleElicitationRequest, handleUrlElicitation, registerElicitationHandler, } from "./elicitation-handler.js";
+import { handleElicitationRequest, handleFormElicitation, handleUrlElicitation, registerElicitationHandler, whileAdapterPromptOpen, } from "./elicitation-handler.js";
 import { attachTaskSession } from "./mcp-tasks.js";
-import { interpolateEnvVars, expandHomePath, providerAuthUrlError, resolveBearerToken, resolveCommandSecretsRecord, resolveConfigPath, resolveServerUrl, } from "./utils.js";
+import { interpolateEnvVars, expandHomePath, providerAuthUrlError, resolveBearerToken, resolveCommandSecretsRecord, resolveConfigPath, resolveServerUrl, supportsOAuth, } from "./utils.js";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals } from "./runtime-owner.js";
 import { createMcpTraceWriter, isMcpTraceEnabled, traceTransportKind, wrapTransportWithMcpTrace, } from "./mcp-trace.js";
@@ -77,7 +77,7 @@ export function isUnauthorizedHttpError(error) {
         || (error instanceof SdkHttpError && error.status === 401)
         // Some pinned-SDK transport paths emit this plain Error when bearer
         // request headers are used without an OAuth authProvider.
-        || (error instanceof Error && /^Error POSTing to endpoint \(HTTP 401\):/.test(error.message));
+        || (error instanceof Error && error.message.startsWith("Error POSTing to endpoint (HTTP 401):"));
 }
 function shouldFallbackToSse(error, definition) {
     if (definition.protocolVersion === "2026-07-28")
@@ -243,6 +243,8 @@ export class McpServerManager {
     samplingConfig;
     metadataListChangedListener;
     listenStateChangedListener;
+    connectionReplacedListener;
+    connectionInitializedListener;
     resourceUpdatedListeners = new Map();
     pendingMetadataPublications = new Map();
     elicitationConfig;
@@ -271,6 +273,13 @@ export class McpServerManager {
     setListenStateChangedListener(listener) {
         this.listenStateChangedListener = listener;
     }
+    setConnectionReplacedListener(listener) {
+        this.connectionReplacedListener = listener;
+    }
+    /** Called once a connection attempt's initialize handshake succeeds, before tool discovery. */
+    setConnectionInitializedListener(listener) {
+        this.connectionInitializedListener = listener;
+    }
     publishMetadataChanged(name, expectedConnection, reason) {
         const current = this.connections.get(name);
         if (current !== expectedConnection || current.status !== "connected")
@@ -289,6 +298,29 @@ export class McpServerManager {
     }
     setElicitationConfig(config) {
         this.elicitationConfig = config;
+    }
+    /** Shows a server-supplied MCP form with Pi's dialogs. Undefined when this session cannot prompt. */
+    async promptFormElicitation(name, params, signal) {
+        const config = this.elicitationConfig;
+        if (!config)
+            return undefined;
+        return whileAdapterPromptOpen(this.connections.get(name)?.client, () => handleFormElicitation({ ...config, serverName: name }, params, signal));
+    }
+    /**
+     * A prompt that shows an adapter-supplied URL with the URL-elicitation consent dialog and opens
+     * it on accept. Undefined when this session cannot open URLs: headless, non-TUI or shut down.
+     */
+    urlElicitationPrompt(name) {
+        const config = this.elicitationConfig;
+        if (this.runtimeSignal?.aborted || !config?.allowUrl)
+            return undefined;
+        return async (params, signal) => {
+            const result = await whileAdapterPromptOpen(this.connections.get(name)?.client, () => handleUrlElicitation({ ...config, serverName: name }, params, signal));
+            // The browser step can outlast the call that started it; give the user one idle timeout to finish.
+            if (result.action === "accept")
+                this.touch(name);
+            return result;
+        };
     }
     setRuntimeSignal(signal) {
         this.runtimeSignal = signal;
@@ -407,10 +439,7 @@ export class McpServerManager {
         const generation = this.closeGenerations.get(name) ?? 0;
         const attemptController = new AbortController();
         const attemptSignal = combineAbortSignals(ownedSignal, attemptController.signal);
-        const connectionAttempt = this.createConnection(name, definition, attemptSignal, ownedSignal, credentialsInvalidated, oauthAuthority, attemptController);
-        const promise = definition.url
-            ? connectionAttempt.catch(async (error) => { throw await this.enrichHttpConnectionError(definition, error); })
-            : connectionAttempt;
+        const promise = this.createConnection(name, definition, attemptSignal, ownedSignal, credentialsInvalidated, oauthAuthority, attemptController);
         this.connectPromises.set(name, promise);
         if (oauthAuthority)
             this.connectOAuthAuthorities.set(name, oauthAuthority);
@@ -837,10 +866,7 @@ export class McpServerManager {
         const generation = this.closeGenerations.get(name) ?? 0;
         const credentialsInvalidated = staleConnection.status === "needs-auth"
             && staleConnection.credentialsInvalidated === true;
-        const candidateAttempt = this.createConnection(name, definition, signal, signal, credentialsInvalidated, oauthAuthority, attemptOwner);
-        const fresh = definition.url
-            ? await candidateAttempt.catch(async (error) => { throw await this.enrichHttpConnectionError(definition, error); })
-            : await candidateAttempt;
+        const fresh = await this.createConnection(name, definition, signal, signal, credentialsInvalidated, oauthAuthority, attemptOwner);
         // An explicit close or a concurrent replacement supersedes this candidate.
         // Dispose only the candidate we own; never close whichever route is now
         // registered under the shared server name.
@@ -865,6 +891,12 @@ export class McpServerManager {
         // Publish first so calls route to the fresh image while the exact displaced
         // child is terminated and reaped. Late close callbacks are identity-guarded.
         staleConnection.status = "closed";
+        try {
+            await this.connectionReplacedListener?.(name, fresh);
+        }
+        catch (error) {
+            logger.warn(`MCP: handing work over to the new ${name} connection failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
         try {
             await this.disposeConnection(staleConnection);
         }
@@ -949,7 +981,8 @@ export class McpServerManager {
             transport = stdioTransport;
         }
         else if (definition.url) {
-            const httpConnection = await this.connectHttpClient(definition, name, requestOptions, signal, traceObserver, invalidated, oauthAuthority, attemptOwner);
+            // Only a failure before initialize completes says anything about the endpoint, so only it is probed.
+            const httpConnection = await this.connectHttpClient(definition, name, requestOptions, signal, traceObserver, invalidated, oauthAuthority, attemptOwner).catch(async (error) => { throw await this.enrichHttpConnectionError(definition, error); });
             client = httpConnection.client;
             transport = httpConnection.transport;
             invalidated = httpConnection.credentialsInvalidated;
@@ -984,6 +1017,7 @@ export class McpServerManager {
             if (!clientConnected) {
                 await this.connectClientWithAbort(client, transport, requestOptions, signal);
             }
+            this.connectionInitializedListener?.(name);
             this.attachAdapterNotificationHandlers(name, client);
             const instructions = client.getInstructions?.();
             const protocolEra = client.getProtocolEra?.();
@@ -1064,8 +1098,10 @@ export class McpServerManager {
                                 onSampling: (request, signal) => handleSamplingRequest({
                                     ...this.samplingConfig,
                                     serverName: name,
-                                    // Cancelling the task should also stop the local sampling run.
-                                    getSignal: () => combineAbortSignals(this.samplingConfig.getSignal(), signal),
+                                    // The task's input signal ends when the task is cancelled, closed or settles, and a
+                                    // blocking call closes its execution on abort. The current turn's signal stays out,
+                                    // so an Esc on a later turn can't abort a background task's sampling.
+                                    getSignal: () => combineAbortSignals(this.runtimeSignal, signal),
                                 }, request),
                             }
                             : {}),
@@ -1404,9 +1440,7 @@ export class McpServerManager {
                 if (!oauthAuthority)
                     throw new Error(`Missing OAuth authority for ${serverName}`);
                 const provider = new McpOAuthProvider(serverName, serverUrl, extractOAuthConfig(definition), { onRedirect: async () => { } }, this.authStorageOptions, combineAbortSignals(this.oauthRuntime?.signal, signal), undefined, oauthAuthority);
-                provider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders, combineAbortSignals(this.oauthRuntime?.signal, signal), {
-                    ...(caFetch ? { delegate: caFetch.fetch } : {}),
-                }));
+                provider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders, combineAbortSignals(this.oauthRuntime?.signal, signal), caFetch ? { delegate: caFetch.fetch } : {}));
                 return provider;
             };
             // Explicit OAuth checks secure storage immediately. Implicit OAuth keeps
@@ -1499,10 +1533,10 @@ export class McpServerManager {
                         this.codingProviders.set(client, authProvider);
                     return { status: "connected", client, transport };
                 }
-                catch (error) {
-                    if (error instanceof SseError && sseFetchFailure !== undefined) {
-                        error = new AggregateError([error, sseFetchFailure], error.message);
-                    }
+                catch (caught) {
+                    const error = caught instanceof SseError && sseFetchFailure !== undefined
+                        ? new AggregateError([caught, sseFetchFailure], caught.message)
+                        : caught;
                     const abortCleanupFailed = error instanceof AggregateError
                         && error.message === "MCP connection abort cleanup failed";
                     if (!abortCleanupFailed) {

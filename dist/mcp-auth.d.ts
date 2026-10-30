@@ -99,7 +99,8 @@ export declare function getTestAuthSecretStoreEntries(): [string, string][];
 export declare function removeTestAuthSecretStoreEntry(account: string): void;
 export declare function setTestAuthSecretStoreEntry(account: string, payload: string): void;
 export declare function loadTestKeyringEntryClass(keyringRequire: KeyringRequire, platform: NodeJS.Platform, arch: NodeJS.Architecture): KeyringEntryConstructor;
-export declare function getAuthStorageOptions(oauthDir: unknown, cwd?: string, persistence?: unknown, oauthCredentialStore?: unknown, sessionOwner?: object, launchConfigPath?: string): AuthStorageOptions;
+export declare function getAuthStorageOptions(oauthDir: unknown, cwd?: string, persistence?: unknown, oauthCredentialStore?: unknown, sessionOwner?: object, // eslint-disable-line anti-slop/no-object-parameters -- Identity-only weak key; no properties are read.
+launchConfigPath?: string): AuthStorageOptions;
 export declare function getAuthStorageIdentity(options?: AuthStorageOptions): string;
 export declare function getAuthBaseDir(options?: AuthStorageOptions): string;
 /**
