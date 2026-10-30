@@ -109,7 +109,7 @@ export async function authenticateDevice(
       check()
       throwIfAborted(signal)
       return { ok: response.ok, payload }
-    } catch (error) {
+    } catch {
       check()
       throwIfAborted(signal)
       // A remote error body or transport diagnostic can contain pairing secrets.

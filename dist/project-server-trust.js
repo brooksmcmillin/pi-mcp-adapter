@@ -25,16 +25,33 @@ export function disabledServerReason(blocked, name) {
     const block = blocked?.get(name);
     return block ? describeProjectServerBlock(block.reason) : `disabled. Run /mcp-adapter enable ${name} and /reload to enable it.`;
 }
+/** One line per blocked project script tool, for scriptToolIssues. */
+export function describeBlockedScriptTool(name, block) {
+    const reason = {
+        untrusted: "the project is not trusted; trust the project to review and approve it",
+        "approval-required": "it needs your approval; approve it in a trusted interactive session or set user-global settings.projectServers to \"allow\"",
+        denied: "you did not allow it; reload in a trusted interactive session to approve it",
+    }[block.reason];
+    return `${block.source.path}: script tool "${name}" was not loaded — ${reason}.`;
+}
 function asLoadedConfig(config) {
     const metadata = config[MCP_CONFIG_SOURCE_METADATA];
     return {
         config,
         projectServers: metadata?.projectServers ?? new Map(),
+        projectScriptTools: metadata?.projectScriptTools ?? new Map(),
         projectServerPolicy: metadata?.projectServerPolicy ?? "ask",
     };
 }
 export function hasProjectServerDefinitions(config) {
     return asLoadedConfig(config).projectServers.size > 0;
+}
+export function hasProjectScriptToolDefinitions(config) {
+    return (asLoadedConfig(config).projectScriptTools?.size ?? 0) > 0;
+}
+/** The script-tool issues `loadMcpConfig` found in the config files of `config`; none for any other config. */
+export function loadedScriptToolIssues(config) {
+    return config[MCP_CONFIG_SOURCE_METADATA]?.scriptToolIssues ?? [];
 }
 function canonicalize(value) {
     if (Array.isArray(value))
@@ -48,6 +65,10 @@ function canonicalize(value) {
 }
 export function hashProjectServerDefinition(definition) {
     return createHash("sha256").update(JSON.stringify(canonicalize(definition))).digest("hex");
+}
+// The approval key of a script tool, kept apart from server names.
+function scriptToolApprovalKey(name) {
+    return `scriptTools/${name}`;
 }
 export function canonicalProjectRoot(cwd) {
     try {
@@ -124,7 +145,7 @@ function loadApprovals() {
 function saveApproval(record) {
     const path = approvalPath();
     const store = loadApprovals();
-    store.approvals = store.approvals.filter(entry => entry.projectRoot !== record.projectRoot || entry.serverName !== record.serverName);
+    store.approvals = store.approvals.filter(entry => entry.projectRoot !== record.projectRoot || entry.serverName !== record.serverName || entry.kind !== record.kind);
     store.approvals.push(record);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -143,9 +164,19 @@ export function approveProjectServer(cwd, serverName, definition) {
         approvedAt: new Date().toISOString(),
     });
 }
-function isApproved(approvals, projectRoot, serverName, definition) {
+/** The approval covers the entry as loaded, with its resolved file path, not the script file's bytes. */
+export function approveProjectScriptTool(cwd, name, definition) {
+    saveApproval({
+        projectRoot: projectApprovalScope(cwd),
+        serverName: scriptToolApprovalKey(name),
+        definitionHash: hashProjectServerDefinition(definition),
+        approvedAt: new Date().toISOString(),
+        kind: "scriptTool",
+    });
+}
+function isApproved(approvals, projectRoot, serverName, definition, kind) {
     const definitionHash = hashProjectServerDefinition(definition);
-    return approvals.approvals.some(entry => entry.projectRoot === projectRoot && entry.serverName === serverName && entry.definitionHash === definitionHash);
+    return approvals.approvals.some(entry => entry.projectRoot === projectRoot && entry.serverName === serverName && entry.definitionHash === definitionHash && entry.kind === kind);
 }
 function isProjectTrusted(ctx) {
     try {
@@ -195,8 +226,10 @@ function describeServer(definition) {
 export async function applyProjectServerTrust(loaded, ctx, options = {}) {
     const config = { ...loaded.config, mcpServers: { ...loaded.config.mcpServers } };
     const blockedServers = new Map();
-    if (loaded.projectServers.size === 0)
-        return { config, blockedServers };
+    const blockedScriptTools = new Map();
+    const projectScriptTools = loaded.projectScriptTools ?? new Map();
+    if (loaded.projectServers.size === 0 && projectScriptTools.size === 0)
+        return { config, blockedServers, blockedScriptTools };
     const projectTrusted = isProjectTrusted(ctx);
     // RPC sessions also have a UI, but Pi reads RPC input only after session_start, so a dialog here never resolves.
     const interactive = ctx.hasUI && ctx.mode === "tui";
@@ -227,12 +260,40 @@ export async function applyProjectServerTrust(loaded, ctx, options = {}) {
         config.mcpServers[name] = { ...definition, disabled: true };
         blockedServers.set(name, { reason, source });
     }
-    return { config, blockedServers };
+    // A project script tool goes through the same gate. A blocked one is left out of the config, so it
+    // is never registered and its file is never read.
+    if (projectScriptTools.size > 0)
+        config.scriptTools = { ...config.scriptTools };
+    for (const [name, source] of projectScriptTools) {
+        const definition = config.scriptTools?.[name];
+        if (!definition)
+            continue;
+        const approved = isApproved(approvals, projectRoot, scriptToolApprovalKey(name), definition, "scriptTool");
+        if (projectTrusted && (approved || allowUnapproved))
+            continue;
+        let reason;
+        if (!projectTrusted) {
+            reason = "untrusted";
+        }
+        else if (!interactive) {
+            reason = "approval-required";
+        }
+        else if (await ctx.ui.select(`Allow project script tool “${name}”?\nProject config: ${source.path}\nScript: ${definition.file}\n\nThis tool runs the script in Pi's codemode, where it can call your MCP and Pi tools. The script file can change without asking you again.`, PROJECT_SERVER_CHOICES) === ALLOW_PROJECT_SERVER) {
+            approveProjectScriptTool(ctx.cwd, name, definition);
+            continue;
+        }
+        else {
+            reason = "denied";
+        }
+        delete config.scriptTools[name];
+        blockedScriptTools.set(name, { reason, source });
+    }
+    return { config, blockedServers, blockedScriptTools };
 }
 export function applyProjectServerTrustToConfig(config, ctx, options = {}) {
     return applyProjectServerTrust(asLoadedConfig(config), ctx, options);
 }
-/** Remove project-derived servers before an ExtensionContext exists. */
+/** Remove project-derived servers and script tools before an ExtensionContext exists. */
 export function excludeProjectServersAtLoadTime(loadedOrConfig) {
     const loaded = "config" in loadedOrConfig && "projectServers" in loadedOrConfig
         ? loadedOrConfig
@@ -240,6 +301,11 @@ export function excludeProjectServersAtLoadTime(loadedOrConfig) {
     const config = { ...loaded.config, mcpServers: { ...loaded.config.mcpServers } };
     for (const name of loaded.projectServers.keys())
         delete config.mcpServers[name];
+    if (loaded.projectScriptTools?.size && config.scriptTools) {
+        config.scriptTools = { ...config.scriptTools };
+        for (const name of loaded.projectScriptTools.keys())
+            delete config.scriptTools[name];
+    }
     return config;
 }
 //# sourceMappingURL=project-server-trust.js.map

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { captureOAuthAuthority, clearAllCredentials, getAuthEntryFilePath, getAuthForUrl, getAuthStorageOptions, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
+import { captureOAuthAuthority, getAuthEntryFilePath, getAuthForUrl, getAuthStorageOptions, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
 import { CodingAuthClient } from "../mcp-coding-auth.ts";
 
 type OAuthProviderLike = {

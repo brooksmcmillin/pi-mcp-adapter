@@ -43,6 +43,8 @@ jobs:
           npm run --prefix examples/interactive-visualizer build
       - name: Typecheck
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
       - run: npm test
       # npm test ends with build:public, so any change here means a tracked dist/ file is stale.
       - name: Check tracked dist files match the sources
@@ -54,20 +56,6 @@ jobs:
       - run: npm run test:oauth
       - run: npm run test:conformance
       - run: npm pack --dry-run
-
-  node24-worker-fds:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-      - run: npm test -- --run __tests__/mcp-code.test.ts
 
   windows-recheck-paths:
     runs-on: windows-latest

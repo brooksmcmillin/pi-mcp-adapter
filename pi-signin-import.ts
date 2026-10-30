@@ -1,11 +1,10 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getPiMcpAuthPath, isPiMcpConfigEnabled } from "./config.ts";
-import { supportsOAuth } from "./mcp-auth-flow.ts";
 import { getAuthStorageOptions, inspectAuthForUrl, saveAuthEntry, type AuthEntry, type AuthStorageOptions, type StoredClientInfo } from "./mcp-auth.ts";
 import { loadOnboardingState, markPiSignInImportAsked } from "./onboarding-state.ts";
 import { isServerDisabled, type McpConfig } from "./types.ts";
-import { resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
+import { resolveServerUrl, sanitizeTerminalText, supportsOAuth } from "./utils.ts";
 
 interface PiSignInImport {
   serverName: string;

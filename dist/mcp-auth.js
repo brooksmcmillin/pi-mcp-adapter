@@ -558,7 +558,8 @@ export function loadTestKeyringEntryClass(keyringRequire, platform, arch) {
 // credentials without keeping a disposed SDK session or extension runtime alive.
 const SESSION_AUTH_STORES = Symbol.for('pi-mcp-adapter.session-auth-stores.v1');
 const sessionAuthRegistry = globalThis;
-export function getAuthStorageOptions(oauthDir, cwd = process.cwd(), persistence = undefined, oauthCredentialStore = undefined, sessionOwner, launchConfigPath) {
+export function getAuthStorageOptions(oauthDir, cwd = process.cwd(), persistence = undefined, oauthCredentialStore = undefined, sessionOwner, // eslint-disable-line anti-slop/no-object-parameters -- Identity-only weak key; no properties are read.
+launchConfigPath) {
     if (persistence !== undefined && persistence !== 'persistent' && persistence !== 'session') {
         throw new Error('settings.oauthPersistence must be "persistent" or "session"');
     }

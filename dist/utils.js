@@ -3,6 +3,19 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import stripJsonComments from "strip-json-comments";
+/** Check whether an HTTP server configuration permits OAuth. */
+export function supportsOAuth(definition) {
+    if (!definition.url)
+        return false;
+    if (definition.auth === false || definition.oauth === false)
+        return false;
+    if (definition.auth === "oauth")
+        return true;
+    // Custom headers take precedence over implicit OAuth detection.
+    if (definition.headers && Object.keys(definition.headers).length > 0)
+        return false;
+    return definition.auth === undefined;
+}
 export function stripUtf8Bom(raw) {
     return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
 }
@@ -121,15 +134,16 @@ export function getConfigPathFromArgv() {
 }
 export function interpolateEnvVars(value, environment = process.env) {
     return value
-        .replace(/\$\{(\w+)\}/g, (_, name) => environment[name] ?? "")
+        // `${NAME:-default}` uses the default only when NAME is unset, as Claude Code does.
+        .replace(/\$\{(\w+)(?::-([^}]*))?\}/g, (_, name, fallback) => environment[name] ?? fallback ?? "")
         .replace(/\$env:(\w+)/g, (_, name) => environment[name] ?? "")
         .replace(/\{env:(\w+)\}/g, (_, name) => environment[name] ?? "");
 }
 export function getMissingEnvVars(value, environment = process.env) {
     const missing = new Set();
-    for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
-        const name = match[1] ?? match[2] ?? match[3];
-        if (name && environment[name] === undefined) {
+    for (const match of value.matchAll(/\$\{(\w+)(:-[^}]*)?\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
+        const name = match[1] ?? match[3] ?? match[4];
+        if (name && match[2] === undefined && environment[name] === undefined) {
             missing.add(name);
         }
     }
@@ -314,6 +328,7 @@ export function sanitizeTerminalText(text) {
         .replace(/\s+/g, " ")
         .trim();
 }
+/** Keep the full destination clickable when Pi wraps the visible label. */
 export function terminalHyperlink(label, url) {
     return `\u001B]8;;${sanitizeTerminalText(url)}\u001B\\${sanitizeTerminalText(label)}\u001B]8;;\u001B\\`;
 }

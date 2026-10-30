@@ -8,9 +8,11 @@ const MAX_LOG_BYTES = 5 * 1024 * 1024;
  */
 export function appendServerLogMessage(path, serverName, params) {
     // Servers control logger and data; neither may start a line that looks like another server's entry.
+    // A checked-out project config is another writer's input, so the name gets the same treatment.
+    const server = serverName.replace(/\p{Cc}/gu, " ");
     const source = params.logger ? ` ${params.logger.replace(/\p{Cc}/gu, " ")}:` : "";
     const text = (typeof params.data === "string" ? params.data : JSON.stringify(params.data)).replace(/\r\n|\r|\n/g, "\n    ");
-    const line = `${new Date().toISOString()} [${serverName}] ${params.level}${source} ${text}\n`;
+    const line = `${new Date().toISOString()} [${server}] ${params.level}${source} ${text}\n`;
     try {
         mkdirSync(dirname(path), { recursive: true });
         if ((statSync(path, { throwIfNoEntry: false })?.size ?? 0) > MAX_LOG_BYTES)

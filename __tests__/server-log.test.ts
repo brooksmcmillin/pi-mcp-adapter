@@ -40,4 +40,19 @@ describe("server log messages", () => {
 
     expect(readFileSync(path, "utf8")).toMatch(/^\S+Z \[real\] info db 2026-10-18T00:00:00\.000Z \[other\]: a\n {4}b\n$/);
   });
+
+  it("keeps a server's name from starting a line of its own", () => {
+    agentDir = mkdtempSync(join(tmpdir(), "server-log-agent-"));
+    const path = join(agentDir, "mcp.log");
+
+    appendServerLogMessage(path, "repo-tool\n2026-10-28T00:00:00.000Z [trusted] error: forged", {
+      level: "info",
+      data: "hi",
+    } as never);
+
+    const text = readFileSync(path, "utf8");
+    expect(text.endsWith("\n")).toBe(true);
+    expect(text.slice(0, -1)).not.toContain("\n");
+    expect(text).toContain("[repo-tool 2026-10-28T00:00:00.000Z [trusted] error: forged]");
+  });
 });

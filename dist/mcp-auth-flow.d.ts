@@ -106,14 +106,6 @@ export declare function replaceCodingSession(serverName: string, serverUrl: stri
     retire: () => Promise<void>;
 }): Promise<void>;
 /**
- * Check if OAuth is supported for a server configuration.
- * OAuth is supported for HTTP servers unless explicitly disabled.
- *
- * @param definition - The server definition
- * @returns True if OAuth is supported
- */
-export declare function supportsOAuth(definition: ServerEntry): boolean;
-/**
  * Initialize the OAuth system on startup.
  * OAuth callback binding is lazy and starts from startAuth() only.
  */
