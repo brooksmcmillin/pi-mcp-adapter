@@ -52,6 +52,46 @@ describe("MCP elicitation", () => {
     resolveSelection("Continue");
   });
 
+  it.each([
+    ["initial", 0], ["field", 1], ["input", 2], ["review", 3], ["edit", 4], ["url", 0],
+  ] as const)("dismisses the %s dialog using the request signal", async (dialog, stopAt) => {
+    const { handleElicitationRequest } = await import("../elicitation-handler.ts");
+    const controller = new AbortController();
+    let index = 0;
+    let dismissed = false;
+    let opened = false;
+    const answers = ["Continue", "Enter value", "synthetic", "Edit"];
+    const prompt = vi.fn((_title, _choices, options?: { signal?: AbortSignal }) => {
+      expect(options?.signal).toBe(controller.signal);
+      if (index++ !== stopAt) return Promise.resolve(answers[index - 1]);
+      opened = true;
+      return new Promise<undefined>(resolve => {
+        options!.signal!.addEventListener("abort", () => {
+          dismissed = true;
+          resolve(undefined);
+        }, { once: true });
+      });
+    });
+    const ui = createUi({ select: prompt, input: prompt });
+    const onUrlAccepted = vi.fn();
+    const params: ElicitRequest["params"] = dialog === "url" ? {
+      mode: "url", message: "Authorize", elicitationId: "cancelled-url",
+      url: "https://example.com/authorize",
+    } : {
+      mode: "form", message: "Confirm", requestedSchema: {
+        type: "object", properties: { name: { type: "string", title: "Name" } }, required: ["name"],
+      },
+    };
+    const pending = handleElicitationRequest({ serverName: "demo", ui, allowUrl: true, onUrlAccepted }, request(params), controller.signal);
+    const rejected = expect(pending).rejects.toThrow("task cancelled");
+    await vi.waitFor(() => expect(opened).toBe(true));
+    controller.abort(new Error("task cancelled"));
+    await rejected;
+    expect(dismissed).toBe(true);
+    expect(onUrlAccepted).not.toHaveBeenCalled();
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
   it("stops awaiting a URL browser handoff and does not accept it after task cancellation", async () => {
     const { handleElicitationRequest } = await import("../elicitation-handler.ts");
     let resolveOpen!: () => void;
@@ -104,9 +144,10 @@ describe("MCP elicitation", () => {
     expect(ui.select.mock.calls[0]).toEqual([
       "MCP Input Request\nServer: github\n\nPlease provide your GitHub username",
       ["Continue", "Decline"],
+      undefined,
     ]);
     expect(ui.select.mock.calls[1][1]).toEqual(["Enter value"]);
-    expect(ui.input).toHaveBeenCalledWith("GitHub username (required)", undefined);
+    expect(ui.input).toHaveBeenCalledWith("GitHub username (required)", undefined, undefined);
     expect(ui.select.mock.calls[2][0]).toContain("GitHub username: octocat");
     expect(result).toEqual({ action: "accept", content: { username: "octocat" } });
   });
@@ -167,7 +208,7 @@ describe("MCP elicitation", () => {
       }),
     );
 
-    expect(ui.input.mock.calls[1]).toEqual(["Name", "Old"]);
+    expect(ui.input.mock.calls[1]).toEqual(["Name", "Old", undefined]);
     expect(result).toEqual({ action: "accept", content: { name: "New" } });
   });
 
@@ -262,6 +303,7 @@ describe("MCP elicitation", () => {
       expect(select).toHaveBeenCalledWith(
         "MCP Input Request\nServer: demo\n\nConfirm the operation",
         ["Continue", "Decline"],
+        undefined,
       );
     }
   });
@@ -318,7 +360,7 @@ describe("MCP elicitation", () => {
       `Full URL: \u001B]8;;${url}\u001B\\${url}\u001B]8;;\u001B\\`,
       "",
       "Open this URL in your browser?",
-    ].join("\n"), ["Open", "Decline"]);
+    ].join("\n"), ["Open", "Decline"], undefined);
     const urlLine = String(ui.select.mock.calls[0][0]).split("\n")[6].slice("Full URL: ".length);
     const rows = new Text(urlLine, 1, 0).render(width);
     expect(rows.length).toBeGreaterThan(1);
