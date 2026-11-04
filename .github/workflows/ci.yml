@@ -2,12 +2,13 @@ name: CI
 
 on:
   pull_request:
-    # Skip docs-only PRs, but always check .github changes and pushes to main.
+    # Skip prose-only PRs, except the executable scripting recipe.
     paths:
       - "**"
       - "!**/*.md"
       - "!docs/**"
       - ".github/**"
+      - "docs/scripting.md"
   push:
     branches: [main]
 
