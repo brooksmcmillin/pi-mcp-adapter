@@ -145,7 +145,7 @@ Every cached adapter tool is callable from a script as `tools.mcp__<server>__<to
 
 These tools aren't listed in the `codemode` description, so a script finds them with `searchTools(query, { namespace: "mcp__<server>" })`, reads a tool's TypeScript declaration with `describeTool(name)`, and gets a server's tool names and instructions with `describeNamespace("mcp__<server>")`. `ALL_TOOLS` lists every callable tool. Pi's [codemode docs](https://pi.dev/docs/latest/codemode#globals) describe these globals and the rest of the script API.
 
-A call resolves to the MCP `CallToolResult`: `content`, `structuredContent` when the server sent it, and `isError`. Use `structuredContent` when it's there; otherwise most JSON APIs put their payload in `content[0].text`, so parse it. Results returned to a script are not truncated by the adapter's [output guard](tools.md#output-guard); Pi limits what the script returns to the model, to 10,000 tokens by default (`max_output_tokens`), and saves longer output to a temp file. A call that fails at the server or is denied by the adapter resolves with `isError: true`, so check it. A call that Pi blocks before it runs, for example through a permission extension, rejects with an `Error`; `Promise.allSettled()` keeps the results of the other calls.
+A call resolves to the MCP `CallToolResult`: `content`, `structuredContent` when the server sent it, and `isError`. `structuredContent` is the server's value, not necessarily the application object: a server can return `{ "result": "<JSON>" }` there. Without structured content, JSON APIs usually put their payload in text blocks. See [Reading result values](#reading-result-values) before selecting application fields. Results returned to a script are not truncated by the adapter's [output guard](tools.md#output-guard); Pi limits what the script returns to the model, to 10,000 tokens by default (`max_output_tokens`), and saves longer output to a temp file. A call that fails at the server or is denied by the adapter resolves with `isError: true`, so check it. A call that Pi blocks before it runs, for example through a permission extension, rejects with an `Error`; `Promise.allSettled()` keeps the results of the other calls.
 
 ```js
 const found = await searchTools("search issues", { namespace: "mcp__github" });
@@ -159,6 +159,51 @@ return result.structuredContent ?? JSON.parse(result.content[0].text);
 Each call from a script is a Pi tool call under the tool's registered name, with the `codemode` call as its parent, so Pi's `tool_call` hooks and permission extensions see it. The adapter's own gates still run once per call: `approveTools` and the approval broker ([Tool approval](tools.md#tool-approval)). A call connects its server first when it isn't connected yet, and on Pi 1.2 and later a script that names a server whose tools aren't registered yet connects that server before it runs.
 
 Scripts run in Pi's QuickJS sandbox, with no file system, network, timers, or Node APIs of their own; they reach the outside world only through tools. Pi's [limits](https://pi.dev/docs/latest/codemode#limits) apply. To classify results, call `models.classify()` with a classifier such as Jev, as described in Pi's [Models](https://pi.dev/docs/latest/codemode#models).
+
+### Reading result values
+
+Keep parsing inside the script and return only the fields you need, not the full response or a debug dump. Include this helper in the same script; it is not a built-in codemode global:
+
+```js
+function mcpValue(result, { jsonResultEnvelope = false } = {}) {
+  if (result.isError) throw new Error("MCP call failed");
+  const text = (result.content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  if (result.omitted === true || text.includes("[MCP text output truncated")) {
+    throw new Error("MCP result is incomplete");
+  }
+  let value = result.structuredContent;
+  if (value === undefined) {
+    try { value = JSON.parse(text); }
+    catch { return text; }
+  }
+  if (jsonResultEnvelope && value !== null && typeof value === "object"
+      && Object.keys(value).length === 1 && typeof value.result === "string") {
+    value = JSON.parse(value.result);
+  }
+  if (value?.omitted === true) throw new Error("MCP result is incomplete");
+  return value;
+}
+```
+
+Set `jsonResultEnvelope: true` only for a server documented to encode JSON in a sole `result` field. This decodes that wrapper once; malformed wrapped JSON throws. Leave it off for ordinary objects with a legitimate `result` field. Direct structured values and JSON text need no option. Plain text stays a string, including text that is not valid JSON; it is not proof of a complete application object.
+
+Validate the fields required by your operation after decoding. For example, after discovering a task-reading tool, include the helper above and read a bounded summary in one call:
+
+```js
+const result = await tools.mcp__tasks__get_task({ task_id: "task_123" });
+const value = mcpValue(result, { jsonResultEnvelope: true });
+const task = value?.task;
+if (!task || typeof task.id !== "string" || typeof task.title !== "string"
+    || typeof task.status !== "string") {
+  throw new Error("Expected a complete task summary");
+}
+return { id: task.id, title: task.title, status: task.status };
+```
+
+Use the tool name and field contract returned by discovery, not this illustrative name. Rejected calls still throw; `isError` and explicit omission/truncation never become successful task bodies. The helper does not fetch again, recover omitted data, or change the adapter's output guard or Pi's script-output limits. A server that silently omits data without marking it cannot be detected generically; validate every field you require.
 
 ## Script tools
 

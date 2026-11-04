@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -76,6 +76,75 @@ async function withPiSession(
     }
   }
 }
+
+// The documentation is the consumer implementation; execute its exact snippets to prevent drift.
+const scriptingDoc = await readFile(resolve("docs/scripting.md"), "utf8");
+const resultReader = scriptingDoc.match(/```js\n(function mcpValue[\s\S]*?)\n```/)![1];
+const taskSummary = scriptingDoc.match(/```js\n(const result = await tools\.mcp__tasks__get_task[\s\S]*?)\n```/)![1];
+
+describe("documented MCP result reader in Pi codemode", () => {
+  it.each(["structured", "envelope", "text", "split-text"])("reads a bounded task from %s in one call", async (format) => {
+    await withPiSession({ codemode: true }, async ({ session, toolCalls }) => {
+      const runner = session.extensionRunner;
+      await vi.waitFor(() => expect(runner.createToolContext("probe", undefined).tools.map(tool => tool.name))
+        .toContain("mcp__fixture__get_task"), { timeout: 10_000 });
+      const codemode = runner.getAllRegisteredTools().find(tool => tool.definition.name === "codemode")!.definition;
+      const consumer = taskSummary.replace("tools.mcp__tasks__get_task", "tools.mcp__fixture__get_task")
+        .replace('{ task_id: "task_123" }', JSON.stringify({ task_id: "task_123", format }));
+      const result = await codemode.execute("read-task", { code: `${resultReader}\n${consumer}` }, undefined, undefined,
+        runner.createToolContext("read-task", undefined));
+      const text = result.content.map(block => block.type === "text" ? block.text : "").join("");
+      expect(text).toContain("Script completed");
+      expect(JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)))
+        .toEqual({ id: "task_123", title: "Sanitized task", status: "pending" });
+      expect(text).not.toContain("not for model output");
+      expect(toolCalls).toEqual([{ name: "mcp__fixture__get_task", id: "read-task/1", parent: "read-task" }]);
+    });
+  }, 20_000);
+
+  it.each([
+    ["plain", "Expected a complete task summary"],
+    ["error", "MCP call failed"],
+    ["omitted", "MCP result is incomplete"],
+    ["truncated", "MCP result is incomplete"],
+    ["partial", "Expected a complete task summary"],
+    ["malformed-envelope", "Script error:"],
+    ["ambiguous-text", "Expected a complete task summary"],
+  ])("does not accept %s as a task body", async (format, message) => {
+    await withPiSession({ codemode: true }, async ({ session, toolCalls }) => {
+      const runner = session.extensionRunner;
+      await vi.waitFor(() => expect(runner.createToolContext("probe", undefined).tools.map(tool => tool.name))
+        .toContain("mcp__fixture__get_task"), { timeout: 10_000 });
+      const codemode = runner.getAllRegisteredTools().find(tool => tool.definition.name === "codemode")!.definition;
+      const consumer = taskSummary.replace("tools.mcp__tasks__get_task", "tools.mcp__fixture__get_task")
+        .replace('{ task_id: "task_123" }', JSON.stringify({ task_id: "task_123", format }));
+      const result = await codemode.execute("read-task", { code: `${resultReader}\n${consumer}` }, undefined, undefined,
+        runner.createToolContext("read-task", undefined));
+      const text = result.content.map(block => block.type === "text" ? block.text : "").join("");
+      expect(text).toContain("Script failed");
+      expect(text).toContain(message);
+      expect(text).not.toContain("not for model output");
+      expect(toolCalls).toHaveLength(1);
+    });
+  }, 20_000);
+
+  it("preserves legitimate plain text and result fields without envelope opt-in", async () => {
+    await withPiSession({ codemode: true }, async ({ session }) => {
+      const runner = session.extensionRunner;
+      const codemode = runner.getAllRegisteredTools().find(tool => tool.definition.name === "codemode")!.definition;
+      const code = `${resultReader}\nreturn [
+        mcpValue({ content: [{ type: "text", text: "Service is healthy" }] }),
+        mcpValue({ structuredContent: { result: '{"domain":"value"}' } })
+      ];`;
+      const result = await codemode.execute("read-values", { code }, undefined, undefined,
+        runner.createToolContext("read-values", undefined));
+      const text = result.content.map(block => block.type === "text" ? block.text : "").join("");
+      expect(text).toContain("Script completed");
+      const values = JSON.parse(text.slice(text.indexOf("["), text.lastIndexOf("]") + 1));
+      expect(values).toEqual(["Service is healthy", { result: '{"domain":"value"}' }]);
+    });
+  }, 20_000);
+});
 
 describe("Pi codemode reach to proxy-only MCP tools", () => {
   it("calls a proxy-only server's tool through ctx.executeTool and gets its CallToolResult", async () => {
