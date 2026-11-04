@@ -105,7 +105,7 @@ describe("Executor pauses", () => {
     expect(textOf(result)).toContain("email sent");
     expect(`${textOf(result)} ${JSON.stringify(result.details)}`).not.toMatch(/apr_|requestId|approval-required/);
     expect(ui.select).toHaveBeenCalledOnce();
-    expect(ui.select).toHaveBeenCalledWith(expect.stringContaining('Arguments:\n{\n  "to": "a@example.com"\n}'), ["Continue", "Decline"]);
+    expect(ui.select).toHaveBeenCalledWith(expect.stringContaining('Arguments:\n{\n  "to": "a@example.com"\n}'), ["Continue", "Decline"], undefined);
     expect(await resumes()).toEqual([{ requestId: "apr_1", response: { action: "accept" } }]);
   });
 

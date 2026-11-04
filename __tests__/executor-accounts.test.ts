@@ -253,7 +253,7 @@ describe("connecting a missing Executor account", () => {
 
     expect(visible(result)).toContain("needs-account data");
     expect(open).toHaveBeenCalledExactlyOnceWith(fixtureLinks[mode].url);
-    expect(ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining("needs-account needs your service account"), ["Open", "Decline"]);
+    expect(ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining("needs-account needs your service account"), ["Open", "Decline"], undefined);
     expect(await sent("call")).toBe(2);
     expect(visible(result)).not.toMatch(/fixture-secret|token=|conn_|executor\.test|127\.0\.0\.1/);
     expect(JSON.stringify(ui.notify.mock.calls)).not.toMatch(/fixture-secret|token=|conn_|executor\.test|127\.0\.0\.1/);
@@ -268,7 +268,7 @@ describe("connecting a missing Executor account", () => {
     expect(ui.select).toHaveBeenCalledTimes(3);
     expect(handOffs).toBe(path === "hand-off" ? 1 : 0);
     expect(ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining("MCP: executor wants to run call"), expect.any(Array));
-    expect(ui.select).toHaveBeenNthCalledWith(2, expect.stringContaining("needs-account needs your service account"), ["Open", "Decline"]);
+    expect(ui.select).toHaveBeenNthCalledWith(2, expect.stringContaining("needs-account needs your service account"), ["Open", "Decline"], undefined);
     expect(open).toHaveBeenCalledOnce();
     expect(await sent("call")).toBe(2);
     expect(await sent("execute")).toBe(2);

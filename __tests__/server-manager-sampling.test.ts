@@ -154,7 +154,7 @@ describe("McpServerManager sampling", () => {
         elicitationId: "known-id",
         url: "https://example.com/connect",
       },
-    });
+    }, { mcpReq: { signal: new AbortController().signal } });
     const completionHandler = client.setNotificationHandler.mock.calls
       .find(([method]: [string]) => method === "notifications/elicitation/complete")[1];
     completionHandler({ params: { elicitationId: "unknown-id" } });
