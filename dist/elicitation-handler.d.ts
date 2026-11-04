@@ -3,11 +3,13 @@ import type { Client } from "@modelcontextprotocol/client";
 import { type ElicitRequest, type ElicitRequestFormParams, type ElicitRequestURLParams, type ElicitResult, type RequestOptions } from "@modelcontextprotocol/client";
 export type ElicitationValue = string | number | boolean | string[] | undefined;
 export type ElicitationUIContext = Pick<ExtensionUIContext, "select" | "input" | "notify">;
+export type ElicitationStage = "received" | "prompt_requested" | "response_ready" | "cancelled" | "failed";
 export interface ElicitationHandlerOptions {
     serverName: string;
     ui: ElicitationUIContext;
     allowUrl: boolean;
     onUrlAccepted?: (elicitationId: string) => void;
+    onStage?: (stage: ElicitationStage) => void;
 }
 export type ServerElicitationConfig = Omit<ElicitationHandlerOptions, "serverName" | "onUrlAccepted">;
 export declare function registerElicitationHandler(client: Client, options: ElicitationHandlerOptions): void;

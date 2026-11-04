@@ -1600,6 +1600,9 @@ export class McpServerManager {
       registerElicitationHandler(client, {
         ...this.elicitationConfig,
         serverName,
+        onStage: stage => appendServerLogMessage(logPath ??= getAgentPath("mcp.log"), serverName, {
+          level: "info", logger: "elicitation", data: stage,
+        }),
         onUrlAccepted: elicitationId => this.rememberUrlElicitation(serverName, elicitationId),
       });
       if (this.elicitationConfig.allowUrl) {

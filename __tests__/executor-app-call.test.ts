@@ -180,7 +180,7 @@ describe("calling an Executor app tool", () => {
     const result = await callApp(state, leg, "tools.alpha.tool_001", { id: "7" });
 
     expect(textOf(result)).toBe("tools.alpha.tool_001 record 7");
-    expect(ui.select).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Approve tools.alpha.tool_001?"), ["Continue", "Decline"]);
+    expect(ui.select).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Approve tools.alpha.tool_001?"), ["Continue", "Decline"], { signal: expect.any(AbortSignal) });
     expect((await calls()).map(call => call.name)).toEqual(["call", "resume"]);
   });
 
@@ -196,7 +196,7 @@ describe("calling an Executor app tool", () => {
 
     expect(textOf(result)).toBe("needs-account data");
     expect(open).toHaveBeenCalledOnce();
-    expect(ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining("needs-account needs your service account"), ["Open", "Decline"]);
+    expect(ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining("needs-account needs your service account"), ["Open", "Decline"], { signal: expect.any(AbortSignal) });
     const sent = (await calls()).map(call => call.name);
     expect(sent.filter(name => name === "call")).toHaveLength(2);
     expect((await calls()).find(call => call.name === "call")!.arguments).toEqual({ calls: { path: 'tools["needs-account"].read', input: {} } });

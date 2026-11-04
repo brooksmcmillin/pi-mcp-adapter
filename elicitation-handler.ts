@@ -25,11 +25,14 @@ type FieldCollectionResult = { status: "cancelled" } | { status: "collected"; va
 
 export type ElicitationUIContext = Pick<ExtensionUIContext, "select" | "input" | "notify">;
 
+export type ElicitationStage = "received" | "prompt_requested" | "response_ready" | "cancelled" | "failed";
+
 export interface ElicitationHandlerOptions {
   serverName: string;
   ui: ElicitationUIContext;
   allowUrl: boolean;
   onUrlAccepted?: (elicitationId: string) => void;
+  onStage?: (stage: ElicitationStage) => void;
 }
 
 export type ServerElicitationConfig = Omit<ElicitationHandlerOptions, "serverName" | "onUrlAccepted">;
@@ -47,8 +50,18 @@ const promptPauses = new WeakMap<Client, PromptPause>();
 export function registerElicitationHandler(client: Client, options: ElicitationHandlerOptions): void {
   const state: PromptPause = { open: 0, deadlines: new Set() };
   promptPauses.set(client, state);
-  client.setRequestHandler("elicitation/create", request =>
-    whilePromptOpen(state, () => handleElicitationRequest(options, request)));
+  client.setRequestHandler("elicitation/create", (request, ctx) =>
+    whilePromptOpen(state, async () => {
+      options.onStage?.("received");
+      try {
+        const result = await handleElicitationRequest(options, request, ctx.mcpReq.signal);
+        options.onStage?.("response_ready");
+        return result;
+      } catch (error) {
+        options.onStage?.(ctx.mcpReq.signal.aborted ? "cancelled" : "failed");
+        throw error;
+      }
+    }));
 }
 
 /**
@@ -150,9 +163,11 @@ export async function handleFormElicitation(
   signal?: AbortSignal,
 ): Promise<ElicitResult> {
   const properties = Object.entries(params.requestedSchema.properties);
+  options.onStage?.("prompt_requested");
   const decision = await abortable(options.ui.select(
     `MCP Input Request\nServer: ${options.serverName}\n\n${params.message}`,
     ["Continue", "Decline"],
+    signal ? { signal } : undefined,
   ), signal);
   if (decision === undefined) return { action: "cancel" };
   if (decision === "Decline") return { action: "decline" };
@@ -170,13 +185,14 @@ export async function handleFormElicitation(
     const action = await abortable(options.ui.select(
       formatReview(options.serverName, properties, content),
       ["Submit", "Edit", "Decline"],
+      signal ? { signal } : undefined,
     ), signal);
     if (action === undefined) return { action: "cancel" };
     if (action === "Decline") return { action: "decline" };
     if (action === "Submit") return { action: "accept", content };
 
     const labels = properties.map(([name, schema]) => `${schema.title ?? humanizeName(name)} (${name})`);
-    const selected = await abortable(options.ui.select("Choose a field to edit", labels), signal);
+    const selected = await abortable(options.ui.select("Choose a field to edit", labels, signal ? { signal } : undefined), signal);
     if (selected === undefined) return { action: "cancel" };
     const property = properties[labels.indexOf(selected)];
     if (!property) continue;
@@ -242,7 +258,7 @@ async function collectField(
     if (useDefault) actions.push(useDefault);
     const omit = required ? undefined : uniqueAction("Omit", actions);
     if (omit) actions.push(omit);
-    const action = await abortable(ui.select(title, actions), signal);
+    const action = await abortable(ui.select(title, actions, signal ? { signal } : undefined), signal);
     if (action === undefined) return { status: "cancelled" };
     if (action === useDefault) return { status: "collected", value: schema.default };
     if (action === omit) return { status: "collected", value: undefined };
@@ -253,7 +269,7 @@ async function collectField(
     const actions = ["Yes", "No"];
     if (schema.default !== undefined) actions.push("Use default");
     if (!required) actions.push("Omit");
-    const action = await abortable(ui.select(title, actions), signal);
+    const action = await abortable(ui.select(title, actions, signal ? { signal } : undefined), signal);
     if (action === undefined) return { status: "cancelled" };
     if (action === "Use default") return { status: "collected", value: schema.default };
     if (action === "Omit") return { status: "collected", value: undefined };
@@ -264,7 +280,7 @@ async function collectField(
     const actions = ["Choose values"];
     if (schema.default !== undefined) actions.push("Use default");
     if (!required) actions.push("Omit");
-    const action = await abortable(ui.select(title, actions), signal);
+    const action = await abortable(ui.select(title, actions, signal ? { signal } : undefined), signal);
     if (action === undefined) return { status: "cancelled" };
     if (action === "Use default") return { status: "collected", value: schema.default };
     if (action === "Omit") return { status: "collected", value: undefined };
@@ -274,7 +290,7 @@ async function collectField(
     while (true) {
       const displays = uniqueLabels(choices.map(choice => selected.has(choice.value) ? `✓ ${choice.display}` : choice.display));
       const done = uniqueAction("Done", displays);
-      const picked = await abortable(ui.select(title, [...displays, done]), signal);
+      const picked = await abortable(ui.select(title, [...displays, done], signal ? { signal } : undefined), signal);
       if (picked === undefined) return { status: "cancelled" };
       if (picked === done) return { status: "collected", value: [...selected] };
       const choice = choices[displays.indexOf(picked)];
@@ -286,11 +302,11 @@ async function collectField(
 
   const actions = schema.default === undefined ? ["Enter value"] : ["Use default", "Enter value"];
   if (!required) actions.push("Omit");
-  const action = await abortable(ui.select(title, actions), signal);
+  const action = await abortable(ui.select(title, actions, signal ? { signal } : undefined), signal);
   if (action === undefined) return { status: "cancelled" };
   if (action === "Use default") return { status: "collected", value: schema.default };
   if (action === "Omit") return { status: "collected", value: undefined };
-  const entered = await abortable(ui.input(title, current === undefined ? undefined : String(current)), signal);
+  const entered = await abortable(ui.input(title, current === undefined ? undefined : String(current), signal ? { signal } : undefined), signal);
   return entered === undefined ? { status: "cancelled" } : { status: "collected", value: entered };
 }
 
@@ -433,6 +449,7 @@ export async function handleUrlElicitation(
     if (!/^[.,!?;:)\]}`]*$/.test(suffix)) return candidate;
     return urlLink + suffix;
   });
+  options.onStage?.("prompt_requested");
   const decision = await abortable(options.ui.select([
     "MCP Browser Request",
     `Server: ${options.serverName}`,
@@ -443,7 +460,7 @@ export async function handleUrlElicitation(
     `Full URL: ${urlLink}`,
     "",
     "Open this URL in your browser?",
-  ].join("\n"), ["Open", "Decline"]), signal);
+  ].join("\n"), ["Open", "Decline"], signal ? { signal } : undefined), signal);
   if (decision === undefined) return { action: "cancel" };
   if (decision === "Decline") return { action: "decline" };
 
