@@ -28,6 +28,33 @@ export class CodingConsentRequired extends Error {
   constructor() { super(terminal); this.name = "CodingConsentRequired" }
 }
 
+type CodingOperation = "status" | "enroll" | "replace"
+type CodingFailure = "network" | "timeout" | "invalid_response" | "http"
+
+/** Only allowlisted diagnostics: upstream messages and bodies may contain credentials. */
+export class CodingRequestError extends Error {
+  readonly code = "coding_request_failed"
+  readonly toolDispatch = "unknown"
+  readonly nextAction: string
+
+  constructor(readonly operation: CodingOperation, readonly failure: CodingFailure, readonly attempts: number, readonly httpStatus?: number) {
+    const nextAction = operation === "status"
+      ? "Check credential status, then revalidate task ownership before retrying a mutation; no credential rotation was attempted by this status request."
+      : operation === "replace"
+        ? "Credential rotation outcome is unknown; check credential status before recovery; do not replay a credential rotation."
+        : "Enrollment outcome is unknown; do not automatically replay enrollment. Check broker authorization before recovery."
+    super(`Broker coding request failed: operation=${operation}, failure=${failure}, attempts=${attempts}${httpStatus === undefined ? "" : `, http_status=${httpStatus}`}, tool_dispatch=unknown. ${nextAction}`)
+    this.name = "CodingRequestError"
+    this.nextAction = nextAction
+  }
+}
+
+export function codingRequestDetails(error: unknown) {
+  if (!(error instanceof CodingRequestError)) return {}
+  return { codingFailure: { code: error.code, operation: error.operation, failure: error.failure,
+    attempts: error.attempts, httpStatus: error.httpStatus, toolDispatch: error.toolDispatch, nextAction: error.nextAction } }
+}
+
 type RecoveryMode = "ensure" | "status" | "replace"
 type LaunchState = { epoch: number; calls?: Promise<unknown> | undefined; credentials?: CodingCredentials | undefined; denied: boolean; replacementDenied?: boolean; pending?: Promise<StoredTokens | null> | undefined; pendingMode?: RecoveryMode; selectedConfig?: CodingEnrollmentConfig | undefined }
 const REGISTRY = Symbol.for("pi-mcp-adapter.coding-launches.v1")
@@ -235,31 +262,43 @@ export class CodingAuthClient {
 
   private async recover(fetchFn: FetchLike, check: OAuthAuthority, signal: AbortSignal | undefined, mode: RecoveryMode): Promise<StoredTokens | null> {
     let pausedError = this.paused(this.state.credentials?.authorization_ref, true)
-    const request = async (route: string, body: Record<string, string>): Promise<unknown> => {
-      check()
+    const request = async (route: CodingOperation, body: Record<string, string>): Promise<unknown> => {
+      // Status is read-only. Keep both attempts within the existing request deadline;
+      // never retry an enrollment, rotation, or enclosing MCP call here.
       const requestSignal = combineAbortSignals(signal, AbortSignal.timeout(30_000))!
-      try {
-        const response = await abortable(fetchFn(`${this.issuer}/coding/${route}`, {
-          method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify(body), redirect: "error", signal: requestSignal,
-        }), requestSignal)
-        const payload: unknown = await abortable(response.json(), requestSignal)
+      for (let attempt = 1; ; attempt++) {
         check()
-        if (!response.ok) {
-          const error = z.object({ error: z.string() }).safeParse(payload)
-          if (error.success && error.data.error === "invalid_grant") {
-            this.state.denied = true
-            throw new CodingConsentRequired()
-          }
-          if (error.success && error.data.error === "authorization_paused") throw pausedError
+        let httpStatus: number | undefined
+        let readingBody = false
+        try {
+          const response = await abortable(fetchFn(`${this.issuer}/coding/${route}`, {
+            method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify(body), redirect: "error", signal: requestSignal,
+          }), requestSignal)
+          httpStatus = response.status
           if ([404, 405].includes(response.status)) throw new Error(unsupported)
-          throw new Error("Broker coding request failed")
+          readingBody = true
+          const payload: unknown = await abortable(response.json(), requestSignal)
+          check()
+          if (!response.ok) {
+            const error = z.object({ error: z.string() }).safeParse(payload)
+            if (error.success && error.data.error === "invalid_grant") {
+              this.state.denied = true
+              throw new CodingConsentRequired()
+            }
+            if (error.success && error.data.error === "authorization_paused") throw pausedError
+            throw new CodingRequestError(route, "http", attempt, httpStatus)
+          }
+          return payload
+        } catch (error) {
+          check()
+          if (error === pausedError || error instanceof CodingConsentRequired || (error instanceof Error && error.message === unsupported)) throw error
+          const failure = error instanceof CodingRequestError ? error : new CodingRequestError(route,
+            requestSignal.aborted ? "timeout" : readingBody ? "invalid_response" : "network", attempt, httpStatus)
+          if (route === "status" && attempt === 1 && !requestSignal.aborted
+            && (httpStatus === undefined || httpStatus >= 500 || (httpStatus >= 200 && httpStatus < 300))) continue
+          throw failure
         }
-        return payload
-      } catch (error) {
-        check()
-        if (error === pausedError || (error instanceof Error && [terminal, unsupported, "Broker coding request failed"].includes(error.message))) throw error
-        throw new Error("Broker coding request failed; continue to check status (do not replay a credential rotation)")
       }
     }
     const current = this.state.credentials

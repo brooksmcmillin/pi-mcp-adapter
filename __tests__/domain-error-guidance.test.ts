@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDirectToolExecutor } from "../direct-tools.ts";
 import { executeCall } from "../proxy-modes.ts";
+import { CodingRequestError } from "../mcp-coding-auth.ts";
 
 function connectedState() {
   const callTool = vi.fn(async () => ({
@@ -44,6 +45,21 @@ function text(result: { content: Array<{ type: string; text?: string }> }): stri
 }
 
 describe("server-returned domain errors", () => {
+  it.each(["direct", "proxy"])("preserves structured credential diagnostics on the %s path", async path => {
+    const { state, metadata, callTool } = connectedState();
+    callTool.mockRejectedValueOnce(new CodingRequestError("status", "network", 2));
+    const result = path === "proxy"
+      ? await executeCall(state, metadata.name, { id: "test" }, "demo")
+      : await createDirectToolExecutor(() => state, () => null, {
+          serverName: "demo", prefixedName: metadata.name, originalName: metadata.originalName,
+          description: metadata.description, inputSchema: metadata.inputSchema,
+        })("call-1", { id: "test" }, undefined, undefined, undefined as any);
+    expect(result.details).toMatchObject({ codingFailure: {
+      code: "coding_request_failed", operation: "status", failure: "network", attempts: 2, toolDispatch: "unknown",
+    } });
+    expect(text(result)).toContain("operation=status");
+    expect(callTool).toHaveBeenCalledOnce();
+  });
   it.each(["direct", "proxy", "proxy-ui"] as const)("does not append input guidance on the %s path", async (path) => {
     const { state, metadata, callTool } = connectedState();
     if (path === "proxy-ui") metadata.uiResourceUri = "ui://demo/lookup";

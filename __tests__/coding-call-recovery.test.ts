@@ -152,6 +152,7 @@ describe("pending coding invocation", () => {
     if (action === "consent") client.install(proof(9), check)
     if (action === "config" || action === "config-roundtrip") new CodingAuthClient("broker", url, { version: 1, cohort: "other" }, storage)
     if (action === "config-roundtrip") new CodingAuthClient("broker", url, config, storage)
+    if (action === "disconnected") fetcher.mockImplementationOnce(async () => json({}, 503))
     release(action === "revoke" ? json({ error: "invalid_grant" }, 400)
       : action === "unknown" ? json({ version: 2 }) : action === "disconnected" ? json({}, 503) : status())
     await result

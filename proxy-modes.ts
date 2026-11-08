@@ -28,6 +28,7 @@ import { approvalBlockedResult, ensureToolCallApproved, isToolCallApprovalRequir
 import { describeFailure, isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { classifierRegistryOf, semanticSearch, type SemanticClassifierRegistry, type SemanticSearchBackend } from "./semantic-search.ts";
 import { getInputRequiredNeedsUiDetails } from "./errors.ts";
+import { codingRequestDetails } from "./mcp-coding-auth.ts";
 import { createJsonSchemaValidator } from "./json-schema-validator.ts";
 import { describeProjectServerBlock, disabledServerReason } from "./project-server-trust.ts";
 import { findScriptTool } from "./script-tool-surface.ts";
@@ -2094,7 +2095,7 @@ export async function executeCall(
 
     return {
       content: guarded.content,
-      details: { mode: "call", error: isAbortError(error, ownedSignal) ? "aborted" : "call_failed", ...callIdentity, message: guarded.outputGuard ? "output truncated; see outputGuard.fullOutputPath" : message, ...guardedMcpDetails(guarded) },
+      details: { mode: "call", error: isAbortError(error, ownedSignal) ? "aborted" : "call_failed", ...callIdentity, message: guarded.outputGuard ? "output truncated; see outputGuard.fullOutputPath" : message, ...codingRequestDetails(error), ...guardedMcpDetails(guarded) },
     };
   } finally {
     if (uiSession?.reused) {

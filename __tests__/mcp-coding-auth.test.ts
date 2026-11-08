@@ -470,6 +470,21 @@ describe("coding enrollment v1", () => {
     expect(b.requests.filter(r => r.route.endsWith("/replace"))).toHaveLength(1)
   })
 
+  it("reports ambiguous enrollment separately without automatically replaying it", async () => {
+    const b = broker(), c = config(); await initial(storage(), c)
+    const provider = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, storage())
+    provider.setAuthFetch(createOAuthFetch(url, undefined, undefined, { delegate: async (input, init) => {
+      await b.fetchFn(input, init)
+      throw new Error("synthetic-cohort")
+    } }))
+    const error = await provider.tokens().catch(error => error)
+    expect(error).toMatchObject({ operation: "enroll", failure: "network", attempts: 1, toolDispatch: "unknown" })
+    expect(String(error)).toContain("do not automatically replay enrollment")
+    expect(String(error)).not.toContain("rotation")
+    expect(JSON.stringify(error) + String(error)).not.toContain("synthetic-")
+    expect(b.requests.filter(r => r.route.endsWith("/enroll"))).toHaveLength(1)
+  })
+
   it("never replays a consumed rotation whose response was lost or falls back to cohort enrollment", async () => {
     const b = broker(), c = config(), s = storage(); await initial(s, c); b.expire()
     const provider = new McpOAuthProvider("broker", url, c, { onRedirect: vi.fn() }, s)
