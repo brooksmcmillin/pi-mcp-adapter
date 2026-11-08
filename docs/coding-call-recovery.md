@@ -40,6 +40,27 @@ errors, ordinary denials, revocation and unknown versions do not trigger replay.
 The guarantee is one upstream invocation when the first attempt was definitively
 rejected, not exactly-once delivery under arbitrary network failure.
 
+## Credential request failures
+
+Credential failures identify `operation=status|enroll|replace`, the failure class
+(`network`, `timeout`, `invalid_response`, or `http`), attempt count and HTTP status
+when available. Diagnostics never include upstream exception text, response bodies
+or credential values. `tool_dispatch=unknown` means the auth layer cannot establish
+whether the enclosing MCP call ran; it is not permission to replay a mutation.
+
+A transient read-only status failure gets one immediate retry within the same
+30-second deadline (network, malformed JSON, or HTTP 5xx). Deadline exhaustion,
+caller cancellation, consent rejection, authorization pause and other HTTP errors
+do not retry. Enrollment and replacement requests never retry here. Subsequent
+credential recovery still checks status before replacement; a consumed, lost
+replacement cannot fall back to cohort enrollment.
+
+A status failure does not establish expired credentials, a lost task lease or a
+persistent broker outage. Read authoritative task ownership after an uncertain
+renewal and distinguish that observation from the failed request. A successful
+task read does not prove renewal succeeded. Resume mutations only after the
+owning task workflow confirms ownership and safe renewal recovery.
+
 ## Budgets and lifecycle
 
 - One serialized tool invocation per coding launch; different sessions remain
@@ -47,7 +68,8 @@ rejected, not exactly-once delivery under arbitrary network failure.
 - After a definitive pause: at most five minutes and 40 status checks, whichever
   ends first. Check immediately, then jittered exponential polling: 1 second
   multiplied by 1.6, capped at 10 seconds, with ±20% jitter (maximum 12 seconds).
-- Each status/replacement HTTP request has the existing 30-second limit, further
+- Each status check (including its one transient retry) or replacement has the
+  existing 30-second limit, further
   bounded by the wait deadline. At most one replacement follows active status.
   Initial SDK preflight, original invocation and single retry retain their
   existing request deadlines; those are separate from the renewal budget.

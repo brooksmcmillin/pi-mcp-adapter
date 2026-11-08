@@ -21,6 +21,32 @@ export type CodingCredentials = z.infer<typeof credentialSchema>;
 export declare class CodingConsentRequired extends Error {
     constructor();
 }
+type CodingOperation = "status" | "enroll" | "replace";
+type CodingFailure = "network" | "timeout" | "invalid_response" | "http";
+/** Only allowlisted diagnostics: upstream messages and bodies may contain credentials. */
+export declare class CodingRequestError extends Error {
+    readonly operation: CodingOperation;
+    readonly failure: CodingFailure;
+    readonly attempts: number;
+    readonly httpStatus?: number | undefined;
+    readonly code = "coding_request_failed";
+    readonly toolDispatch = "unknown";
+    readonly nextAction: string;
+    constructor(operation: CodingOperation, failure: CodingFailure, attempts: number, httpStatus?: number | undefined);
+}
+export declare function codingRequestDetails(error: unknown): {
+    codingFailure?: never;
+} | {
+    codingFailure: {
+        code: string;
+        operation: CodingOperation;
+        failure: CodingFailure;
+        attempts: number;
+        httpStatus: number | undefined;
+        toolDispatch: string;
+        nextAction: string;
+    };
+};
 type RecoveryMode = "ensure" | "status" | "replace";
 export declare function getRetainedCodingConfig(name: string, url: string, storage: AuthStorageOptions): CodingEnrollmentConfig | undefined;
 export declare function logoutCodingLaunch(name: string, storage: AuthStorageOptions): void;

@@ -22,6 +22,7 @@ import { executorCallParams, executorUnknownToolMatches, executorUnknownToolText
 import { observedOutputRecorder } from "./output-shape.ts";
 import { approvalBlockedResult, ensureToolCallApproved, type ToolCallApprovalResult } from "./tool-approval.ts";
 import { getInputRequiredNeedsUiDetails } from "./errors.ts";
+import { codingRequestDetails } from "./mcp-coding-auth.ts";
 
 type ClientCallToolResult = Awaited<ReturnType<Client["callTool"]>>;
 type ClientReadResourceResult = Awaited<ReturnType<Client["readResource"]>>;
@@ -465,7 +466,7 @@ export function createDirectToolExecutor(
       const guarded = await guardMcpOutput([{ type: "text" as const, text: message }], { ...outputGuardOptions, prefix: "Failed to call tool: ", suffix: schemaText });
       return {
         content: guarded.content,
-        details: { error: aborted ? "aborted" : "call_failed", server: spec.serverName, ...guardedMcpDetails(guarded) },
+        details: { error: aborted ? "aborted" : "call_failed", server: spec.serverName, ...codingRequestDetails(error), ...guardedMcpDetails(guarded) },
       };
     } finally {
       if (uiSession?.reused) {
