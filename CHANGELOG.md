@@ -7,12 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The browser page that hosts MCP Apps no longer ships an old copy of the MCP SDK 1.25.2 that `npm audit` couldn't see. That copy fell in the range of [GHSA-345p-7cg4-v4c7](https://github.com/advisories/GHSA-345p-7cg4-v4c7) and [GHSA-22jm-h49p-29qw](https://github.com/advisories/GHSA-22jm-h49p-29qw), though the adapter never reached the affected code paths. The page now runs on the current MCP Apps bridge and the same MCP SDK 2 packages the adapter already uses, and MCP Apps built with either the old or the new MCP Apps SDK work as before. Thanks to [@taxor03](https://github.com/taxor03) for [#936](https://github.com/nicobailon/pi-mcp-adapter/issues/936).
+
 ### Fixed
 
-- Pi starts faster: the adapter no longer loads its OAuth code at startup just to check whether there are Pi sign-ins to import. In one local test with 211 tools, startup initialization dropped from 3.9 s to 2.3 s. Sign-in behavior is unchanged. Thanks to [@alangalvino](https://github.com/alangalvino) for [#919](https://github.com/nicobailon/pi-mcp-adapter/pull/919).
-- Long sign-in and browser-request links stay clickable when they wrap in the terminal. Before, clicking a wrapped link could open only the part on that line. Thanks to [@alangalvino](https://github.com/alangalvino) for [#920](https://github.com/nicobailon/pi-mcp-adapter/pull/920).
+- When a server changes a prompt's arguments, the next time you run that prompt as a slash command it uses the new arguments. Before, that run could put your values under the old argument names, or let you leave out a newly required argument without an error. Thanks to [@feiiiiii5](https://github.com/feiiiiii5) for [#938](https://github.com/nicobailon/pi-mcp-adapter/pull/938).
+- If you quit Pi just as a slow MCP job finishes, its result is no longer lost. Before, a result that was still being prepared or waiting to be sent to the session was dropped. Now it arrives when you reopen that session, as long as the server still has the job. Thanks to [@feiiiiii5](https://github.com/feiiiiii5) for [#939](https://github.com/nicobailon/pi-mcp-adapter/pull/939).
+
+## [7.0.1] - 2026-11-03
+
+### Highlights
+
+- Servers with long tool or resource names, like a Home Assistant resource with a file path in its name, no longer break every request to OpenAI, Anthropic, Bedrock and other providers that limit tool names to 64 characters.
+- Pi starts faster. In one test with 211 tools, the adapter's startup went from 3.9 s to 2.3 s.
+- A mistyped `mcp` action now returns an error that lists the valid actions, instead of quietly doing something else and looking like it worked.
+- Long sign-in links still open in full when they wrap in the terminal, and tool schemas with an unfamiliar `format` no longer print warnings over Pi's editor.
+
+### Fixed
+
+- When a server's tools are added to Pi as their own tools (`directTools` or search mode), a tool with a long name, such as a resource with a file path in its name, no longer breaks every request to OpenAI, Anthropic, Bedrock and other providers that limit tool names to 64 characters. A name longer than 64 characters is now shortened to 64 and ends in a short hash, so every tool keeps a unique name. Names that already fit don't change. The full name still works anywhere you write it for the adapter: `includeTools`, `excludeTools`, approval rules, `mcp:` references, and `mcp` calls, describes and searches. A Pi tool allowlist that lists one of these tools by its old full name needs the new, shorter name. For permission extensions, `resolveServerFromToolName` now returns no server, rather than the wrong one, when a shortened name could belong to more than one server. Thanks to [@theoretick](https://github.com/theoretick) for [#933](https://github.com/nicobailon/pi-mcp-adapter/issues/933).
+- Pi starts faster: the adapter no longer loads its sign-in code at startup just to check whether there are Pi sign-ins to import. In one test with 211 tools, the adapter's startup went from 3.9 s to 2.3 s. Signing in works the same. Thanks to [@alangalvino](https://github.com/alangalvino) for [#919](https://github.com/nicobailon/pi-mcp-adapter/pull/919).
+- An `mcp` call with an `action` the adapter doesn't know, such as a typo, now returns an error that names the value and lists the valid actions. Before, it quietly did something else, such as listing a server's tools, and looked like it worked. Thanks to [@brendanjerwin](https://github.com/brendanjerwin) for [#930](https://github.com/nicobailon/pi-mcp-adapter/issues/930).
+- Long sign-in and browser links stay clickable when they wrap in the terminal. Before, clicking a wrapped link could open only the part on that line. Thanks to [@alangalvino](https://github.com/alangalvino) for [#920](https://github.com/nicobailon/pi-mcp-adapter/pull/920).
+- A tool schema with a `format` the adapter doesn't know, such as `format: "json"`, no longer prints warnings over Pi's editor and status bar. Tool inputs are still checked the same way. Thanks to [@gabrielpessoa1](https://github.com/gabrielpessoa1) for [#925](https://github.com/nicobailon/pi-mcp-adapter/pull/925).
 - A server name with a line break in it can no longer add a fake entry to `mcp.log`, so every line there is a message a server really sent. Thanks to [@Eapp1e](https://github.com/Eapp1e) for [#921](https://github.com/nicobailon/pi-mcp-adapter/issues/921) and [#922](https://github.com/nicobailon/pi-mcp-adapter/pull/922).
-- A tool schema with a `format` the adapter doesn't know, such as `format: "json"`, no longer prints warnings over Pi's editor and status bar. Validation is unchanged. Thanks to [@gabrielpessoa1](https://github.com/gabrielpessoa1) for [#925](https://github.com/nicobailon/pi-mcp-adapter/pull/925).
 
 ## [7.0.0] - 2026-10-25
 

@@ -18,6 +18,7 @@ export interface CompletedUiSession {
     messages: UiSessionMessages;
     stream?: UiStreamSummary;
 }
+/** `delivery` keeps delayed sends with their task owner; `onSent` runs synchronously after Pi accepts them. */
 export type SendMessageFn = (message: {
     customType: string;
     content: ContentBlock[];
@@ -26,7 +27,10 @@ export type SendMessageFn = (message: {
 }, options?: {
     triggerTurn?: boolean;
     deliverAs?: "steer" | "followUp" | "nextTurn";
-}) => void;
+}, delivery?: {
+    isCurrent: () => boolean;
+    onSent: () => void;
+}) => void | Promise<void>;
 export interface McpExtensionState {
     owner: McpRuntimeOwner;
     manager: McpServerManager;
