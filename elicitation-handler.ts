@@ -15,9 +15,11 @@ import {
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
 import type { JsonSchemaType } from "@modelcontextprotocol/client";
 import open from "open";
+import { randomUUID } from "node:crypto";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";
 import { terminalHyperlink } from "./utils.ts";
+import { handlePermissionApproval, permissionRequest, type ApprovalPreference } from "./permission-approval.ts";
 
 export type ElicitationValue = string | number | boolean | string[] | undefined;
 type FormProperty = ElicitRequestFormParams["requestedSchema"]["properties"][string];
@@ -33,6 +35,9 @@ export interface ElicitationHandlerOptions {
   allowUrl: boolean;
   onUrlAccepted?: (elicitationId: string) => void;
   onStage?: (stage: ElicitationStage) => void;
+  approvalPreference?: ApprovalPreference;
+  approvalClient?: Pick<Client, "callTool">;
+  onApprovalConfirmed?: () => Promise<void>;
 }
 
 export type ServerElicitationConfig = Omit<ElicitationHandlerOptions, "serverName" | "onUrlAccepted">;
@@ -43,18 +48,24 @@ export type ServerElicitationConfig = Omit<ElicitationHandlerOptions, "serverNam
 interface PromptPause {
   open: number;
   deadlines: Set<{ pause(): void; resume(): void }>;
+  approvalCalls: Map<string, AbortSignal>;
+  cancelledApprovalCalls: Set<string>;
 }
 
 const promptPauses = new WeakMap<Client, PromptPause>();
 
 export function registerElicitationHandler(client: Client, options: ElicitationHandlerOptions): void {
-  const state: PromptPause = { open: 0, deadlines: new Set() };
+  const state: PromptPause = { open: 0, deadlines: new Set(), approvalCalls: new Map(), cancelledApprovalCalls: new Set() };
   promptPauses.set(client, state);
   client.setRequestHandler("elicitation/create", (request, ctx) =>
     whilePromptOpen(state, async () => {
       options.onStage?.("received");
       try {
-        const result = await handleElicitationRequest(options, request, ctx.mcpReq.signal);
+        const callId = request.params._meta?.["com.brooksmcmillin/approval-call-id"];
+        const signal = combineAbortSignals(ctx.mcpReq.signal,
+          typeof callId === "string" ? state.approvalCalls.get(callId)
+            ?? (state.cancelledApprovalCalls.has(callId) ? AbortSignal.abort() : undefined) : undefined);
+        const result = await handleElicitationRequest({ ...options, approvalClient: client }, request, signal);
         options.onStage?.("response_ready");
         return result;
       } catch (error) {
@@ -125,6 +136,11 @@ export async function callToolPausingForElicitation(
       );
     },
   };
+  const approvalCallId = params.name === "permission_request.create" && options?.signal ? randomUUID() : undefined;
+  if (approvalCallId && options?.signal) {
+    state.approvalCalls.set(approvalCallId, options.signal);
+    params = { ...params, _meta: { ...params._meta, "com.brooksmcmillin/approval-call-id": approvalCallId } };
+  }
   state.deadlines.add(deadline);
   if (state.open === 0) deadline.resume();
   try {
@@ -141,6 +157,14 @@ export async function callToolPausingForElicitation(
       },
     });
   } finally {
+    if (approvalCallId) {
+      if (options?.signal?.aborted) {
+        state.cancelledApprovalCalls.add(approvalCallId);
+        // Retain late-prompt cancellation without timers or an unbounded history.
+        if (state.cancelledApprovalCalls.size > 128) state.cancelledApprovalCalls.delete(state.cancelledApprovalCalls.values().next().value!);
+      }
+      state.approvalCalls.delete(approvalCallId);
+    }
     state.deadlines.delete(deadline);
     deadline.pause();
   }
@@ -152,25 +176,30 @@ export async function handleElicitationRequest(
   signal?: AbortSignal,
 ): Promise<ElicitResult> {
   throwIfAborted(signal);
-  return request.params.mode === "url"
-    ? handleUrlElicitation(options, request.params, signal)
-    : handleFormElicitation(options, request.params, signal);
+  if (request.params.mode === "url") return handleUrlElicitation(options, request.params, signal);
+  const params = request.params;
+  const approval = permissionRequest(params);
+  if (approval) return handlePermissionApproval(options, params, approval,
+    (formSignal, switchToPush) => handleFormElicitation(options, params, formSignal, switchToPush), signal);
+  return handleFormElicitation(options, params, signal);
 }
 
 export async function handleFormElicitation(
   options: ElicitationHandlerOptions,
   params: ElicitRequestFormParams,
   signal?: AbortSignal,
+  switchToPush?: () => Promise<ElicitResult>,
 ): Promise<ElicitResult> {
   const properties = Object.entries(params.requestedSchema.properties);
   options.onStage?.("prompt_requested");
   const decision = await abortable(options.ui.select(
     `MCP Input Request\nServer: ${options.serverName}\n\n${params.message}`,
-    ["Continue", "Decline"],
+    ["Continue", ...(switchToPush ? ["Use Push"] : []), "Decline"],
     signal ? { signal } : undefined,
   ), signal);
   if (decision === undefined) return { action: "cancel" };
   if (decision === "Decline") return { action: "decline" };
+  if (decision === "Use Push" && switchToPush) return switchToPush();
   if (properties.length === 0) return { action: "accept", content: {} };
 
   const values: Record<string, ElicitationValue> = {};

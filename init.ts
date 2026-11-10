@@ -235,6 +235,7 @@ export async function initializeMcp(
     manager.setElicitationConfig({
       ui,
       allowUrl: mode === "tui",
+      ...(config.settings?.approvalPreference ? { approvalPreference: config.settings.approvalPreference } : {}),
     });
   }
   const lifecycle = new McpLifecycleManager(manager, (serverName) => hasPendingAuth(serverName, undefined, oauthRuntime));
