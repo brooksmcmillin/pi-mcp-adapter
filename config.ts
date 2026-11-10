@@ -10,6 +10,7 @@ import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPl
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
 import { validateExtractionSettings } from "./extraction-settings.ts";
+import { validateApprovalPreference } from "./permission-approval.ts";
 import { validateSemanticSearchSettings } from "./semantic-settings.ts";
 import { parseScriptTools } from "./script-tools.ts";
 import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type OAuthConfig, type ServerEntry, type McpSettings, type ImportKind, type ScriptToolDefinition, type ServerProvenance } from "./types.ts";
@@ -1515,6 +1516,7 @@ function parseSettings(value: unknown): McpSettings {
   const settings = { ...value } as McpSettings;
   if (value.semanticSearch !== undefined) validateSemanticSearchSettings(value.semanticSearch);
   if (value.extraction !== undefined) validateExtractionSettings(value.extraction);
+  if (value.approvalPreference !== undefined) validateApprovalPreference(value.approvalPreference);
   return settings;
 }
 

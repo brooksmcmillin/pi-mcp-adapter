@@ -1,17 +1,22 @@
 import { DEFAULT_REQUEST_TIMEOUT_MSEC, ProtocolError, ProtocolErrorCode, SdkError, SdkErrorCode, } from "@modelcontextprotocol/client";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
 import open from "open";
+import { randomUUID } from "node:crypto";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals } from "./runtime-owner.js";
 import { terminalHyperlink } from "./utils.js";
+import { handlePermissionApproval, permissionRequest } from "./permission-approval.js";
 const promptPauses = new WeakMap();
 export function registerElicitationHandler(client, options) {
-    const state = { open: 0, deadlines: new Set() };
+    const state = { open: 0, deadlines: new Set(), approvalCalls: new Map(), cancelledApprovalCalls: new Set() };
     promptPauses.set(client, state);
     client.setRequestHandler("elicitation/create", (request, ctx) => whilePromptOpen(state, async () => {
         options.onStage?.("received");
         try {
-            const result = await handleElicitationRequest(options, request, ctx.mcpReq.signal);
+            const callId = request.params._meta?.["com.brooksmcmillin/approval-call-id"];
+            const signal = combineAbortSignals(ctx.mcpReq.signal, typeof callId === "string" ? state.approvalCalls.get(callId)
+                ?? (state.cancelledApprovalCalls.has(callId) ? AbortSignal.abort() : undefined) : undefined);
+            const result = await handleElicitationRequest({ ...options, approvalClient: client }, request, signal);
             options.onStage?.("response_ready");
             return result;
         }
@@ -79,6 +84,11 @@ export async function callToolPausingForElicitation(client, params, options) {
             timer = setTimeout(() => expired.abort(new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", { timeout })), Math.max(remaining, 0));
         },
     };
+    const approvalCallId = params.name === "permission_request.create" && options?.signal ? randomUUID() : undefined;
+    if (approvalCallId && options?.signal) {
+        state.approvalCalls.set(approvalCallId, options.signal);
+        params = { ...params, _meta: { ...params._meta, "com.brooksmcmillin/approval-call-id": approvalCallId } };
+    }
     state.deadlines.add(deadline);
     if (state.open === 0)
         deadline.resume();
@@ -98,24 +108,39 @@ export async function callToolPausingForElicitation(client, params, options) {
         });
     }
     finally {
+        if (approvalCallId) {
+            if (options?.signal?.aborted) {
+                state.cancelledApprovalCalls.add(approvalCallId);
+                // Retain late-prompt cancellation without timers or an unbounded history.
+                if (state.cancelledApprovalCalls.size > 128)
+                    state.cancelledApprovalCalls.delete(state.cancelledApprovalCalls.values().next().value);
+            }
+            state.approvalCalls.delete(approvalCallId);
+        }
         state.deadlines.delete(deadline);
         deadline.pause();
     }
 }
 export async function handleElicitationRequest(options, request, signal) {
     throwIfAborted(signal);
-    return request.params.mode === "url"
-        ? handleUrlElicitation(options, request.params, signal)
-        : handleFormElicitation(options, request.params, signal);
+    if (request.params.mode === "url")
+        return handleUrlElicitation(options, request.params, signal);
+    const params = request.params;
+    const approval = permissionRequest(params);
+    if (approval)
+        return handlePermissionApproval(options, params, approval, (formSignal, switchToPush) => handleFormElicitation(options, params, formSignal, switchToPush), signal);
+    return handleFormElicitation(options, params, signal);
 }
-export async function handleFormElicitation(options, params, signal) {
+export async function handleFormElicitation(options, params, signal, switchToPush) {
     const properties = Object.entries(params.requestedSchema.properties);
     options.onStage?.("prompt_requested");
-    const decision = await abortable(options.ui.select(`MCP Input Request\nServer: ${options.serverName}\n\n${params.message}`, ["Continue", "Decline"], signal ? { signal } : undefined), signal);
+    const decision = await abortable(options.ui.select(`MCP Input Request\nServer: ${options.serverName}\n\n${params.message}`, ["Continue", ...(switchToPush ? ["Use Push"] : []), "Decline"], signal ? { signal } : undefined), signal);
     if (decision === undefined)
         return { action: "cancel" };
     if (decision === "Decline")
         return { action: "decline" };
+    if (decision === "Use Push" && switchToPush)
+        return switchToPush();
     if (properties.length === 0)
         return { action: "accept", content: {} };
     const values = {};

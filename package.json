@@ -137,6 +137,7 @@
     "session-recovery.ts",
     "sampling-handler.ts",
     "elicitation-handler.ts",
+    "permission-approval.ts",
     "executor-accounts.ts",
     "executor-app-tools.ts",
     "executor-catalog.ts",

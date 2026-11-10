@@ -1394,6 +1394,11 @@ export class McpServerManager {
                     handleElicitationRequest({
                       ...this.elicitationConfig!,
                       serverName: name,
+                      approvalClient: client,
+                      onApprovalConfirmed: async () => {
+                        const result = await this.fetchAllTools(client);
+                        this.handleToolsListChanged(name, client, null, result.tools);
+                      },
                       onUrlAccepted: elicitationId => this.rememberUrlElicitation(name, elicitationId),
                     }, request, signal),
                 }
@@ -1604,6 +1609,10 @@ export class McpServerManager {
           level: "info", logger: "elicitation", data: stage,
         }),
         onUrlAccepted: elicitationId => this.rememberUrlElicitation(serverName, elicitationId),
+        onApprovalConfirmed: async () => {
+          const result = await this.fetchAllTools(client);
+          this.handleToolsListChanged(serverName, client, null, result.tools);
+        },
       });
       if (this.elicitationConfig.allowUrl) {
         client.setNotificationHandler("notifications/elicitation/complete", notification => {

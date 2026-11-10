@@ -694,6 +694,8 @@ export interface McpSettings {
   sampling?: boolean;
   samplingAutoApprove?: boolean;
   elicitation?: boolean;
+  /** Convenience preference for request-bound approvals, never broker policy. Default: totp. */
+  approvalPreference?: "totp" | "push" | "ask";
   /**
    * Guard oversized MCP tool/resource output before it is returned to the model.
    * Defaults to true (50 KiB / 2,000 lines inline text, 16 KiB details.mcpResult).

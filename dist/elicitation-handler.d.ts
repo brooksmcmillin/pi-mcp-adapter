@@ -1,6 +1,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Client } from "@modelcontextprotocol/client";
 import { type ElicitRequest, type ElicitRequestFormParams, type ElicitRequestURLParams, type ElicitResult, type RequestOptions } from "@modelcontextprotocol/client";
+import { type ApprovalPreference } from "./permission-approval.ts";
 export type ElicitationValue = string | number | boolean | string[] | undefined;
 export type ElicitationUIContext = Pick<ExtensionUIContext, "select" | "input" | "notify">;
 export type ElicitationStage = "received" | "prompt_requested" | "response_ready" | "cancelled" | "failed";
@@ -10,6 +11,9 @@ export interface ElicitationHandlerOptions {
     allowUrl: boolean;
     onUrlAccepted?: (elicitationId: string) => void;
     onStage?: (stage: ElicitationStage) => void;
+    approvalPreference?: ApprovalPreference;
+    approvalClient?: Pick<Client, "callTool">;
+    onApprovalConfirmed?: () => Promise<void>;
 }
 export type ServerElicitationConfig = Omit<ElicitationHandlerOptions, "serverName" | "onUrlAccepted">;
 export declare function registerElicitationHandler(client: Client, options: ElicitationHandlerOptions): void;
@@ -32,6 +36,6 @@ export declare function whileAdapterPromptOpen<T>(client: Client | undefined, ru
  */
 export declare function callToolPausingForElicitation(client: Client, params: Parameters<Client["callTool"]>[0], options?: RequestOptions): ReturnType<Client["callTool"]>;
 export declare function handleElicitationRequest(options: ElicitationHandlerOptions, request: ElicitRequest, signal?: AbortSignal): Promise<ElicitResult>;
-export declare function handleFormElicitation(options: ElicitationHandlerOptions, params: ElicitRequestFormParams, signal?: AbortSignal): Promise<ElicitResult>;
+export declare function handleFormElicitation(options: ElicitationHandlerOptions, params: ElicitRequestFormParams, signal?: AbortSignal, switchToPush?: () => Promise<ElicitResult>): Promise<ElicitResult>;
 export declare function coerceAndValidateFormValues(params: ElicitRequestFormParams, values: Record<string, ElicitationValue>): Record<string, string | number | boolean | string[]>;
 export declare function handleUrlElicitation(options: ElicitationHandlerOptions, params: ElicitRequestURLParams, signal?: AbortSignal): Promise<ElicitResult>;
