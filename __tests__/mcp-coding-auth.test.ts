@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
+
+vi.mock("node:timers/promises", () => ({ setTimeout: vi.fn(async (_ms, _value, { signal }) => { signal.throwIfAborted() }) }))
 import { readFileSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 import { createServer } from "node:http"

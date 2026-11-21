@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { setTimeout as sleep } from "node:timers/promises"
 import type { FetchLike } from "@modelcontextprotocol/client"
 import { z } from "zod"
 import { abortable } from "./abort.ts"
@@ -39,7 +40,7 @@ export class CodingRequestError extends Error {
 
   constructor(readonly operation: CodingOperation, readonly failure: CodingFailure, readonly attempts: number, readonly httpStatus?: number) {
     const nextAction = operation === "status"
-      ? "Check credential status, then revalidate task ownership before retrying a mutation; no credential rotation was attempted by this status request."
+      ? "Authorization status is unavailable, not proof of expired credentials or an upstream tool failure. After broker recovery, check status and revalidate task ownership before retrying a mutation; no credential rotation was attempted by this status request."
       : operation === "replace"
         ? "Credential rotation outcome is unknown; check credential status before recovery; do not replay a credential rotation."
         : "Enrollment outcome is unknown; do not automatically replay enrollment. Check broker authorization before recovery."
@@ -263,7 +264,7 @@ export class CodingAuthClient {
   private async recover(fetchFn: FetchLike, check: OAuthAuthority, signal: AbortSignal | undefined, mode: RecoveryMode): Promise<StoredTokens | null> {
     let pausedError = this.paused(this.state.credentials?.authorization_ref, true)
     const request = async (route: CodingOperation, body: Record<string, string>): Promise<unknown> => {
-      // Status is read-only. Keep both attempts within the existing request deadline;
+      // Status is read-only. Back off across brief broker restarts within one deadline;
       // never retry an enrollment, rotation, or enclosing MCP call here.
       const requestSignal = combineAbortSignals(signal, AbortSignal.timeout(30_000))!
       for (let attempt = 1; ; attempt++) {
@@ -294,9 +295,19 @@ export class CodingAuthClient {
           check()
           if (error === pausedError || error instanceof CodingConsentRequired || (error instanceof Error && error.message === unsupported)) throw error
           const failure = error instanceof CodingRequestError ? error : new CodingRequestError(route,
-            requestSignal.aborted ? "timeout" : readingBody ? "invalid_response" : "network", attempt, httpStatus)
-          if (route === "status" && attempt === 1 && !requestSignal.aborted
-            && (httpStatus === undefined || httpStatus >= 500 || (httpStatus >= 200 && httpStatus < 300))) continue
+            requestSignal.aborted ? "timeout"
+              : httpStatus !== undefined && (httpStatus < 200 || httpStatus >= 300) ? "http"
+              : readingBody ? "invalid_response" : "network", attempt, httpStatus)
+          if (route === "status" && attempt < 5 && !requestSignal.aborted
+            && (httpStatus === undefined || httpStatus >= 500 || (httpStatus >= 200 && httpStatus < 300))) {
+            try {
+              await sleep(1000 * 2 ** (attempt - 1) * (1 + Math.random() * 0.2), undefined, { signal: requestSignal })
+            } catch {
+              check()
+              throw new CodingRequestError(route, "timeout", attempt, httpStatus)
+            }
+            continue
+          }
           throw failure
         }
       }
