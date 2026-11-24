@@ -37,6 +37,7 @@ import {
   clearOAuthState,
   getAuthStorageIdentity,
   beginOAuthRevocation,
+  captureBasicEnrollmentAuthority,
   captureOAuthAuthority,
   OAuthCredentialStoreError,
   type AuthStorageOptions,
@@ -50,6 +51,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts"
 import { abortable, throwIfAborted } from "./abort.ts"
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts"
 import { authenticateDevice, type DeviceAuthOptions } from "./mcp-device-auth.ts"
+import { BasicConsentRequired } from "./mcp-basic-auth.ts"
 import { beginCodingSessionReplacement, CodingConsentRequired, getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.ts"
 
 /** Auth status for a server */
@@ -60,6 +62,7 @@ export interface McpOAuthRuntime {
 }
 
 export interface AuthenticateOptions {
+  firstBasicEnrollmentOnly?: boolean
   onDeviceAuthorization?: DeviceAuthOptions["onDeviceAuthorization"]
   onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
   openAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
@@ -91,6 +94,7 @@ function applyOAuthConfig(discovery: AuthDiscovery, config: McpOAuthConfig): Aut
 }
 
 type PendingAuth = {
+  basicSlot: string | undefined
   serverName: string
   authProvider: McpOAuthProvider
   serverUrl: string
@@ -103,7 +107,7 @@ type PendingAuth = {
   authority: OAuthAuthority
 }
 
-type PendingAuthentication = { promise: Promise<AuthStatus>; authority: OAuthAuthority }
+type PendingAuthentication = { basicSlot: string | undefined; promise: Promise<AuthStatus>; authority: OAuthAuthority }
 
 type RuntimeState = {
   controller: AbortController
@@ -197,6 +201,7 @@ export function extractOAuthConfig(definition: ServerEntry): McpOAuthConfig {
   }
 
   const config: McpOAuthConfig = {}
+  if (definition.oauth?.basicEnrollment !== undefined) config.basicEnrollment = validateCodingConfig(definition.oauth.basicEnrollment, "basicEnrollment")
   if (definition.oauth?.codingEnrollment !== undefined) config.codingEnrollment = validateCodingConfig(definition.oauth.codingEnrollment)
   if (definition.oauth?.grantType !== undefined) config.grantType = definition.oauth.grantType
   if (definition.oauth?.clientId !== undefined) {
@@ -464,7 +469,10 @@ export async function startAuth(
   operationAuthority?: OAuthAuthority,
 ): Promise<{ authorizationUrl: string }> {
   if (isServerDisabled(definition)) throw new Error(`MCP server "${serverName}" is disabled`)
-  const authority = operationAuthority ?? captureOAuthAuthority(serverName, true, options.authStorageOptions)
+  const lifecycle = operationAuthority ?? captureOAuthAuthority(serverName, true, options.authStorageOptions)
+  const checkClear = definition?.oauth && definition.oauth.basicEnrollment
+    ? captureBasicEnrollmentAuthority(serverName, options.authStorageOptions ?? {}) : undefined
+  const authority = checkClear ? () => { lifecycle(); checkClear() } : lifecycle
   authority()
   const runtime = getRuntime(options)
   const runtimeState = getRuntimeState(runtime)
@@ -479,18 +487,18 @@ export async function startAuth(
 
   const retainedCoding = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions)
   if (retainedCoding) config.codingEnrollment = retainedCoding
-  let codingConsentRequired = false
-  if (config.codingEnrollment) {
+  let enrollmentConsentRequired = false
+  if (config.codingEnrollment || config.basicEnrollment) {
     try {
       const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) })
       authority()
       throwIfAborted(signal)
       if (existing) return { authorizationUrl: "" }
     } catch (error) {
-      // Only this explicit sign-in path may request new human consent. Token reads
-      // and reconnect remain terminal and never fall back to a new enrollment.
-      if (!(error instanceof CodingConsentRequired)) throw error
-      codingConsentRequired = true
+      // Startup may initiate first enrollment, but not retry a rejected proof.
+      if (!(error instanceof CodingConsentRequired || error instanceof BasicConsentRequired)) throw error
+      if (options.firstBasicEnrollmentOnly && error instanceof BasicConsentRequired && !error.firstEnrollment) throw error
+      enrollmentConsentRequired = true
       authority()
       throwIfAborted(signal)
     }
@@ -564,7 +572,10 @@ export async function startAuth(
   }
 
   const existingPendingAuth = runtimeState.pendingAuths.get(getPendingAuthKey(serverName, authStorageOptions))
-  if (existingPendingAuth?.serverUrl === serverUrl) {
+  if (existingPendingAuth && !hasOAuthAuthority(existingPendingAuth.authority)) {
+    await clearPendingAuthAndReleaseIfIdle(runtime, serverName, undefined, authStorageOptions)
+  } else if (existingPendingAuth?.serverUrl === serverUrl) {
+    if (existingPendingAuth.basicSlot !== config.basicEnrollment?.cohort) throw new Error("A different OAuth enrollment is already pending")
     existingPendingAuth.authority()
     return { authorizationUrl: existingPendingAuth.authorizationUrl }
   }
@@ -614,7 +625,7 @@ export async function startAuth(
       capturedUrl = url
     },
   }, authStorageOptions, runtime.signal, oauthState, authority)
-  if (codingConsentRequired) authProvider.requestCodingConsent()
+  if (enrollmentConsentRequired) authProvider.requestEnrollmentConsent()
 
   try {
     const storedAuth = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
@@ -661,6 +672,7 @@ export async function startAuth(
       throw new UnauthorizedError("OAuth authorization URL was not provided")
     }
     await setPendingAuth(runtime, serverName, {
+      basicSlot: config.basicEnrollment?.cohort,
       serverName,
       authProvider,
       serverUrl,
@@ -1057,23 +1069,21 @@ export async function authenticate(
   options: AuthenticateOptions = {},
 ): Promise<AuthStatus> {
   if (isServerDisabled(definition)) throw new Error(`MCP server "${serverName}" is disabled`)
-  const authority = captureOAuthAuthority(serverName, true, options.authStorageOptions)
+  const authStorageOptions = options.authStorageOptions ?? {}
+  const lifecycle = captureOAuthAuthority(serverName, true, authStorageOptions)
+  const checkClear = definition?.oauth && definition.oauth.basicEnrollment
+    ? captureBasicEnrollmentAuthority(serverName, authStorageOptions) : undefined
+  const authority = checkClear ? () => { lifecycle(); checkClear() } : lifecycle
   const runtime = getRuntime(options)
   const runtimeState = getRuntimeState(runtime)
-  const authStorageOptions = options.authStorageOptions ?? {}
   const signal = combineAbortSignals(runtime.signal, options.signal)
   throwIfAborted(signal)
   const authKey = JSON.stringify([serverName, serverUrl, getAuthStorageIdentity(authStorageOptions)])
+  const basicSlot = definition?.oauth ? definition.oauth.basicEnrollment?.cohort : undefined
   const inFlight = runtimeState.pendingAuthentications.get(authKey)
-  if (inFlight) {
-    try {
-      inFlight.authority()
-      return inFlight.promise
-    } catch {
-      if (runtimeState.pendingAuthentications.get(authKey) === inFlight) {
-        runtimeState.pendingAuthentications.delete(authKey)
-      }
-    }
+  if (inFlight && hasOAuthAuthority(inFlight.authority)) {
+    if (inFlight.basicSlot !== basicSlot) throw new Error("A different OAuth enrollment is already pending")
+    return inFlight.promise
   }
 
   const operation = (async (): Promise<AuthStatus> => {
@@ -1165,7 +1175,7 @@ export async function authenticate(
     }
   })()
 
-  const pendingAuthentication = { promise: operation, authority }
+  const pendingAuthentication = { basicSlot, promise: operation, authority }
   runtimeState.pendingAuthentications.set(authKey, pendingAuthentication)
 
   try {
@@ -1199,7 +1209,7 @@ export async function getValidToken(
   const config = options.definition ? extractOAuthConfig(options.definition) : {}
   const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions)
   if (codingConfig) config.codingEnrollment = codingConfig
-  if (config.codingEnrollment) {
+  if (config.codingEnrollment || config.basicEnrollment) {
     const provider = new McpOAuthProvider(serverName, serverUrl, config, { onRedirect: async () => {} }, authStorageOptions, signal, undefined, authority)
     try {
       provider.setAuthFetch(createOAuthFetch(serverUrl, pluginAwareOAuthHeaders(options.definition), signal))
@@ -1213,7 +1223,7 @@ export async function getValidToken(
   const entry = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
   if (!hasOAuthAuthority(authority)) return null
   throwIfAborted(signal)
-  if (!entry?.tokens) {
+  if (!entry?.tokens || entry.tokens.basicEnrollmentSlot !== undefined) {
     return null
   }
 
@@ -1263,7 +1273,7 @@ export async function getValidToken(
         const refreshed = await getAuthForUrl(serverName, serverUrl, authStorageOptions)
         authority()
         throwIfAborted(signal)
-        return refreshed?.tokens ?? null
+        return refreshed?.tokens?.basicEnrollmentSlot === undefined ? refreshed?.tokens ?? null : null
       } finally {
         authProvider.deactivate()
       }
@@ -1284,11 +1294,13 @@ export async function getValidToken(
  * @param serverName - The name of the MCP server
  * @returns The current auth status
  */
-export async function getAuthStatus(serverName: string, options: AuthenticateOptions = {}): Promise<AuthStatus> {
+export async function getAuthStatus(serverName: string, options: AuthenticateOptions & { serverUrl?: string } = {}): Promise<AuthStatus> {
   getRuntime(options)
   const authStorageOptions = options.authStorageOptions ?? {}
-  const entry = getAuthEntry(serverName, authStorageOptions)
-  if (!entry?.tokens) return "not_authenticated"
+  const entry = options.serverUrl !== undefined ? getAuthForUrl(serverName, options.serverUrl, authStorageOptions) : getAuthEntry(serverName, authStorageOptions)
+  const oauth = options.definition?.oauth
+  const slot = oauth ? oauth.basicEnrollment?.cohort : undefined
+  if (!entry?.tokens || entry.tokens.basicEnrollmentSlot !== slot) return "not_authenticated"
   return entry.tokens.expiresAt && entry.tokens.expiresAt < Date.now() / 1000 ? "expired" : "authenticated"
 }
 
@@ -1303,8 +1315,8 @@ export async function removeAuth(serverName: string, options: AuthenticateOption
   throwIfAborted(signal)
   const authStorageOptions = options.authStorageOptions ?? {}
   const releaseRevocation = beginOAuthRevocation(serverName, authStorageOptions)
-  logoutCodingLaunch(serverName, authStorageOptions)
   try {
+    logoutCodingLaunch(serverName, authStorageOptions)
     detachPendingAuthsForServer(serverName, new Error("Authorization cancelled by logout"))
     const storedOAuthState = getOAuthState(serverName, authStorageOptions)
     if (storedOAuthState) cancelPendingCallback(storedOAuthState)

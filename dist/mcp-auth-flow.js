@@ -7,7 +7,7 @@ import { auth as runSdkAuth, extractWWWAuthenticateParams, LATEST_PROTOCOL_VERSI
 import open from "open";
 import { getOAuthCallbackPort, McpOAuthProvider, } from "./mcp-oauth-provider.js";
 import { ensureCallbackServer, waitForCallback, cancelPendingCallback, stopCallbackServer, stopCallbackServerIfIdle, releaseCallbackServer, } from "./mcp-callback-server.js";
-import { getAuthForUrl, getAuthEntry, clearAllCredentials, clearClientInfo, clearCodeVerifier, getOAuthState, clearOAuthState, getAuthStorageIdentity, beginOAuthRevocation, captureOAuthAuthority, OAuthCredentialStoreError, } from "./mcp-auth.js";
+import { getAuthForUrl, getAuthEntry, clearAllCredentials, clearClientInfo, clearCodeVerifier, getOAuthState, clearOAuthState, getAuthStorageIdentity, beginOAuthRevocation, captureBasicEnrollmentAuthority, captureOAuthAuthority, OAuthCredentialStoreError, } from "./mcp-auth.js";
 import { isServerDisabled } from "./types.js";
 import { formatTerminalError, interpolateEnvVars } from "./utils.js";
 import { createOAuthFetch, oauthHeaderResolver, resolveOAuthHeaders } from "./mcp-auth-fetch.js";
@@ -15,6 +15,7 @@ import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.js";
 import { authenticateDevice } from "./mcp-device-auth.js";
+import { BasicConsentRequired } from "./mcp-basic-auth.js";
 import { beginCodingSessionReplacement, CodingConsentRequired, getRetainedCodingConfig, logoutCodingLaunch, validateCodingConfig } from "./mcp-coding-auth.js";
 function pluginAwareOAuthHeaders(definition) {
     return oauthHeaderResolver(definition?.headers, {
@@ -102,6 +103,8 @@ export function extractOAuthConfig(definition) {
         return {};
     }
     const config = {};
+    if (definition.oauth?.basicEnrollment !== undefined)
+        config.basicEnrollment = validateCodingConfig(definition.oauth.basicEnrollment, "basicEnrollment");
     if (definition.oauth?.codingEnrollment !== undefined)
         config.codingEnrollment = validateCodingConfig(definition.oauth.codingEnrollment);
     if (definition.oauth?.grantType !== undefined)
@@ -352,7 +355,10 @@ export function explainRegistrationRejection(error, serverUrl) {
 export async function startAuth(serverName, serverUrl, definition, options = {}, operationAuthority) {
     if (isServerDisabled(definition))
         throw new Error(`MCP server "${serverName}" is disabled`);
-    const authority = operationAuthority ?? captureOAuthAuthority(serverName, true, options.authStorageOptions);
+    const lifecycle = operationAuthority ?? captureOAuthAuthority(serverName, true, options.authStorageOptions);
+    const checkClear = definition?.oauth && definition.oauth.basicEnrollment
+        ? captureBasicEnrollmentAuthority(serverName, options.authStorageOptions ?? {}) : undefined;
+    const authority = checkClear ? () => { lifecycle(); checkClear(); } : lifecycle;
     authority();
     const runtime = getRuntime(options);
     const runtimeState = getRuntimeState(runtime);
@@ -367,8 +373,8 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
     const retainedCoding = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions);
     if (retainedCoding)
         config.codingEnrollment = retainedCoding;
-    let codingConsentRequired = false;
-    if (config.codingEnrollment) {
+    let enrollmentConsentRequired = false;
+    if (config.codingEnrollment || config.basicEnrollment) {
         try {
             const existing = await getValidToken(serverName, serverUrl, { ...options, ...(definition ? { definition } : {}), runtime, ...(signal ? { signal } : {}) });
             authority();
@@ -377,11 +383,12 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
                 return { authorizationUrl: "" };
         }
         catch (error) {
-            // Only this explicit sign-in path may request new human consent. Token reads
-            // and reconnect remain terminal and never fall back to a new enrollment.
-            if (!(error instanceof CodingConsentRequired))
+            // Startup may initiate first enrollment, but not retry a rejected proof.
+            if (!(error instanceof CodingConsentRequired || error instanceof BasicConsentRequired))
                 throw error;
-            codingConsentRequired = true;
+            if (options.firstBasicEnrollmentOnly && error instanceof BasicConsentRequired && !error.firstEnrollment)
+                throw error;
+            enrollmentConsentRequired = true;
             authority();
             throwIfAborted(signal);
         }
@@ -456,7 +463,12 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
         }
     }
     const existingPendingAuth = runtimeState.pendingAuths.get(getPendingAuthKey(serverName, authStorageOptions));
-    if (existingPendingAuth?.serverUrl === serverUrl) {
+    if (existingPendingAuth && !hasOAuthAuthority(existingPendingAuth.authority)) {
+        await clearPendingAuthAndReleaseIfIdle(runtime, serverName, undefined, authStorageOptions);
+    }
+    else if (existingPendingAuth?.serverUrl === serverUrl) {
+        if (existingPendingAuth.basicSlot !== config.basicEnrollment?.cohort)
+            throw new Error("A different OAuth enrollment is already pending");
         existingPendingAuth.authority();
         return { authorizationUrl: existingPendingAuth.authorizationUrl };
     }
@@ -506,8 +518,8 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
             capturedUrl = url;
         },
     }, authStorageOptions, runtime.signal, oauthState, authority);
-    if (codingConsentRequired)
-        authProvider.requestCodingConsent();
+    if (enrollmentConsentRequired)
+        authProvider.requestEnrollmentConsent();
     try {
         const storedAuth = await getAuthForUrl(serverName, serverUrl, authStorageOptions);
         authority();
@@ -552,6 +564,7 @@ export async function startAuth(serverName, serverUrl, definition, options = {},
             throw new UnauthorizedError("OAuth authorization URL was not provided");
         }
         await setPendingAuth(runtime, serverName, {
+            basicSlot: config.basicEnrollment?.cohort,
             serverName,
             authProvider,
             serverUrl,
@@ -885,24 +898,22 @@ export async function completeAuth(serverName, authorizationCode, options = {}) 
 export async function authenticate(serverName, serverUrl, definition, options = {}) {
     if (isServerDisabled(definition))
         throw new Error(`MCP server "${serverName}" is disabled`);
-    const authority = captureOAuthAuthority(serverName, true, options.authStorageOptions);
+    const authStorageOptions = options.authStorageOptions ?? {};
+    const lifecycle = captureOAuthAuthority(serverName, true, authStorageOptions);
+    const checkClear = definition?.oauth && definition.oauth.basicEnrollment
+        ? captureBasicEnrollmentAuthority(serverName, authStorageOptions) : undefined;
+    const authority = checkClear ? () => { lifecycle(); checkClear(); } : lifecycle;
     const runtime = getRuntime(options);
     const runtimeState = getRuntimeState(runtime);
-    const authStorageOptions = options.authStorageOptions ?? {};
     const signal = combineAbortSignals(runtime.signal, options.signal);
     throwIfAborted(signal);
     const authKey = JSON.stringify([serverName, serverUrl, getAuthStorageIdentity(authStorageOptions)]);
+    const basicSlot = definition?.oauth ? definition.oauth.basicEnrollment?.cohort : undefined;
     const inFlight = runtimeState.pendingAuthentications.get(authKey);
-    if (inFlight) {
-        try {
-            inFlight.authority();
-            return inFlight.promise;
-        }
-        catch {
-            if (runtimeState.pendingAuthentications.get(authKey) === inFlight) {
-                runtimeState.pendingAuthentications.delete(authKey);
-            }
-        }
+    if (inFlight && hasOAuthAuthority(inFlight.authority)) {
+        if (inFlight.basicSlot !== basicSlot)
+            throw new Error("A different OAuth enrollment is already pending");
+        return inFlight.promise;
     }
     const operation = (async () => {
         const { authorizationUrl } = await startAuth(serverName, serverUrl, definition, {
@@ -980,7 +991,7 @@ export async function authenticate(serverName, serverUrl, definition, options = 
             throw error;
         }
     })();
-    const pendingAuthentication = { promise: operation, authority };
+    const pendingAuthentication = { basicSlot, promise: operation, authority };
     runtimeState.pendingAuthentications.set(authKey, pendingAuthentication);
     try {
         const result = await operation;
@@ -1010,7 +1021,7 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
     const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, authStorageOptions);
     if (codingConfig)
         config.codingEnrollment = codingConfig;
-    if (config.codingEnrollment) {
+    if (config.codingEnrollment || config.basicEnrollment) {
         const provider = new McpOAuthProvider(serverName, serverUrl, config, { onRedirect: async () => { } }, authStorageOptions, signal, undefined, authority);
         try {
             provider.setAuthFetch(createOAuthFetch(serverUrl, pluginAwareOAuthHeaders(options.definition), signal));
@@ -1028,7 +1039,7 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
     if (!hasOAuthAuthority(authority))
         return null;
     throwIfAborted(signal);
-    if (!entry?.tokens) {
+    if (!entry?.tokens || entry.tokens.basicEnrollmentSlot !== undefined) {
         return null;
     }
     const expired = entry.tokens.expiresAt
@@ -1073,7 +1084,7 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
                 const refreshed = await getAuthForUrl(serverName, serverUrl, authStorageOptions);
                 authority();
                 throwIfAborted(signal);
-                return refreshed?.tokens ?? null;
+                return refreshed?.tokens?.basicEnrollmentSlot === undefined ? refreshed?.tokens ?? null : null;
             }
             finally {
                 authProvider.deactivate();
@@ -1098,8 +1109,10 @@ export async function getValidToken(serverName, serverUrl, options = {}) {
 export async function getAuthStatus(serverName, options = {}) {
     getRuntime(options);
     const authStorageOptions = options.authStorageOptions ?? {};
-    const entry = getAuthEntry(serverName, authStorageOptions);
-    if (!entry?.tokens)
+    const entry = options.serverUrl !== undefined ? getAuthForUrl(serverName, options.serverUrl, authStorageOptions) : getAuthEntry(serverName, authStorageOptions);
+    const oauth = options.definition?.oauth;
+    const slot = oauth ? oauth.basicEnrollment?.cohort : undefined;
+    if (!entry?.tokens || entry.tokens.basicEnrollmentSlot !== slot)
         return "not_authenticated";
     return entry.tokens.expiresAt && entry.tokens.expiresAt < Date.now() / 1000 ? "expired" : "authenticated";
 }
@@ -1114,8 +1127,8 @@ export async function removeAuth(serverName, options = {}) {
     throwIfAborted(signal);
     const authStorageOptions = options.authStorageOptions ?? {};
     const releaseRevocation = beginOAuthRevocation(serverName, authStorageOptions);
-    logoutCodingLaunch(serverName, authStorageOptions);
     try {
+        logoutCodingLaunch(serverName, authStorageOptions);
         detachPendingAuthsForServer(serverName, new Error("Authorization cancelled by logout"));
         const storedOAuthState = getOAuthState(serverName, authStorageOptions);
         if (storedOAuthState)

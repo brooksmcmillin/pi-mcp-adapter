@@ -4,11 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureOAuthAuthority, getAuthEntryFilePath, getAuthForUrl, getAuthStorageOptions, resetTestAuthSecretStore, saveAuthEntry } from "../mcp-auth.ts";
+import { BasicAuthClient } from "../mcp-basic-auth.ts";
 import { CodingAuthClient } from "../mcp-coding-auth.ts";
 
 type OAuthProviderLike = {
   redirectUrl?: string;
   tokens?: () => Promise<unknown>;
+  invalidateCredentials?: (type: "all") => Promise<void>;
   clientInformation?: () => Promise<unknown>;
   saveTokens?: (tokens: { access_token: string; token_type: string }) => Promise<void>;
   saveDiscoveryState?: (state: { authorizationServerUrl: string }) => Promise<void>;
@@ -129,6 +131,38 @@ describe("McpServerManager HTTP bearer auth", () => {
   });
 
 
+
+  it.each(["close", "clear"])("discards a deferred transport-owned basic exchange after %s", async boundary => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    const storage = getAuthStorageOptions(undefined, process.cwd(), "session");
+    const url = "https://broker.example/broker/mcp", config = { version: 1 as const, cohort: "transport" };
+    const session = { version: 1 as const, scope: "profile:default" as const, token_type: "Bearer" as const,
+      access_token: "synthetic-old-access", expires_at: new Date(Date.now() + 60_000).toISOString() };
+    const client = new BasicAuthClient("basic", url, config.cohort, storage);
+    client.install({ ...session, basic_enrollment_token: "synthetic-proof" });
+    client.invalidateAccessToken(session.access_token);
+    let respond!: (response: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>(resolve => { respond = resolve; }));
+    vi.stubGlobal("fetch", fetch);
+    const manager = new McpServerManager();
+    manager.setAuthStorageOptions(storage);
+    try {
+      await manager.connect("basic", { url, auth: "oauth", oauth: { basicEnrollment: config } });
+      const provider = mocks.httpTransports.at(-1)!.options.authProvider!;
+      const pending = provider.tokens!();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      if (boundary === "close") {
+        await manager.close("basic");
+        fetch.mockResolvedValueOnce(Response.json({ ...session, access_token: "replacement" }));
+        await manager.connect("basic", { url, auth: "oauth", oauth: { basicEnrollment: config } });
+        const replacement = mocks.httpTransports.at(-1)!.options.authProvider!;
+        expect((await replacement.tokens!())?.access_token).toBe("replacement");
+      } else await provider.invalidateCredentials!("all");
+      respond(Response.json({ ...session, access_token: "synthetic-new-access", expires_at: new Date(Date.now() + 60_000).toISOString() }));
+      await expect(pending).rejects.toThrow(/no longer active/);
+      expect(getAuthForUrl("basic", url, storage)?.tokens?.accessToken).toBe(boundary === "close" ? "replacement" : undefined);
+    } finally { await manager.closeAll(); vi.unstubAllGlobals(); }
+  });
 
   it("routes transport-owned coding refresh through status and proof replacement", async () => {
     const { McpServerManager } = await import("../server-manager.ts");

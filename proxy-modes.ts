@@ -363,7 +363,7 @@ function ensureBackgroundAuthWatcher(
   void watcher.catch(async (error) => {
     if (isAbortError(error, state.owner.signal)) return;
     try {
-      if (await getAuthStatus(serverName, authOptions) === "authenticated") return;
+      if (await getAuthStatus(serverName, { ...authOptions, definition, serverUrl }) === "authenticated") return;
     } catch (statusError) {
       if (isAbortError(statusError, state.owner.signal)) return;
     }
@@ -477,20 +477,12 @@ async function attemptAutoAuth(
   }
 
   try {
-    if (state.authStorageOptions) {
-      await authenticate(
-        serverName,
-        serverUrl,
-        definition,
-        signal
-          ? { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime }
-          : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
-      );
-    } else if (signal) {
-        await authenticate(serverName, serverUrl, definition, { signal, runtime: state.oauthRuntime });
-      } else {
-        await authenticate(serverName, serverUrl, definition, { runtime: state.oauthRuntime });
-      }
+    await authenticate(serverName, serverUrl, definition, {
+      runtime: state.oauthRuntime,
+      ...(signal && { signal }),
+      ...(state.authStorageOptions && { authStorageOptions: state.authStorageOptions }),
+      ...(definition.oauth && definition.oauth.basicEnrollment && { firstBasicEnrollmentOnly: true }),
+    });
     return { status: "success" };
   } catch (error) {
     if (isAbortError(error, signal)) throw error;

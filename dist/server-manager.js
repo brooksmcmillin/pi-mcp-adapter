@@ -218,13 +218,13 @@ function createProviderTokenFetch(serverUrl, provider, providerToken, delegate) 
 export class McpServerManager {
     defaultCwd;
     connections = new Map();
-    codingProviders = new WeakMap();
+    enrollmentProviders = new WeakMap();
     codingRenewalPrompt;
     setCodingRenewalPrompt(prompt) {
         this.codingRenewalPrompt = prompt;
     }
     runPendingCodingCall(name, connection, call, options) {
-        const provider = this.codingProviders.get(connection.client);
+        const provider = this.enrollmentProviders.get(connection.client);
         if (!provider)
             return call();
         return provider.runPendingCodingCall(call, { ...options, check: () => {
@@ -233,6 +233,11 @@ export class McpServerManager {
                     throw new Error("Coding pending call cancelled by connection change; manually continue to check current status");
                 }
             } });
+    }
+    retireBasicProvider(client) {
+        const provider = this.enrollmentProviders.get(client);
+        if (provider?.basicEnrollmentEnabled)
+            provider.deactivate();
     }
     connectPromises = new Map();
     connectOAuthAuthorities = new Map();
@@ -1050,6 +1055,7 @@ export class McpServerManager {
             // identity so a stale connection's late close can never clobber a fresh
             // connection. The SDK client owns the transport callbacks.
             client.onclose = () => {
+                this.retireBasicProvider(client);
                 if (connection.status === "closed")
                     return;
                 connection.status = "closed";
@@ -1127,6 +1133,7 @@ export class McpServerManager {
             return connection;
         }
         catch (error) {
+            this.retireBasicProvider(client);
             // If connectClientWithAbort closed the transport, await that exact close.
             // Otherwise the SDK client owns its transport and performs cleanup once.
             const abortCleanup = abortCleanupPromises.get(transport);
@@ -1498,12 +1505,13 @@ export class McpServerManager {
             const attempt = async (kind) => {
                 const authProvider = "provider" in authState ? authState.provider : undefined;
                 const coding = authProvider?.codingEnrollmentEnabled === true;
-                if (coding && authProvider) {
+                const enrollment = coding || authProvider?.basicEnrollmentEnabled === true;
+                if (enrollment && authProvider) {
                     authProvider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders, combineAbortSignals(this.oauthRuntime?.signal, signal), {
                         timeout: false, ...(requestFetch ? { delegate: requestFetch } : {}),
                     }));
                 }
-                const activeFetch = coding && authProvider ? authProvider.getAuthFetch() : requestFetch;
+                const activeFetch = enrollment && authProvider ? authProvider.getAuthFetch() : requestFetch;
                 let sseFetchFailure;
                 const sseFailureCodes = kind !== "sse" ? []
                     : isLoopbackUrl(serverUrl) ? ["ECONNREFUSED"]
@@ -1541,11 +1549,13 @@ export class McpServerManager {
                 const client = this.createClient(serverName, definition);
                 try {
                     await this.connectClientWithAbort(client, transport, requestOptions, signal);
-                    if (coding && authProvider)
-                        this.codingProviders.set(client, authProvider);
+                    if (enrollment && authProvider)
+                        this.enrollmentProviders.set(client, authProvider);
                     return { status: "connected", client, transport };
                 }
                 catch (caught) {
+                    if (authProvider?.basicEnrollmentEnabled)
+                        authProvider.deactivate();
                     const error = caught instanceof SseError && sseFetchFailure !== undefined
                         ? new AggregateError([caught, sseFetchFailure], caught.message)
                         : caught;
@@ -1630,6 +1640,8 @@ export class McpServerManager {
                     throw result.error;
                 }
                 if (definition.httpTransport === undefined && kind === "streamable-http" && shouldFallbackToSse(result.error, definition)) {
+                    if ("provider" in authState && authState.provider.basicEnrollmentEnabled)
+                        authState = { ...authState, provider: createAuthProvider() };
                     kind = "sse";
                     continue;
                 }
@@ -1832,6 +1844,7 @@ export class McpServerManager {
         }
     }
     async disposeConnection(connection) {
+        this.retireBasicProvider(connection.client);
         const results = await Promise.allSettled([
             // Release ext-tasks state first so its SDK adapter detaches before close.
             Promise.resolve().then(async () => {

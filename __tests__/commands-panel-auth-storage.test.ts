@@ -41,6 +41,19 @@ function createState() {
 }
 
 describe("MCP panels with unavailable OAuth credential storage", () => {
+  it("offers connection before declaring a fresh basic launch needs consent", async () => {
+    const state = createState();
+    state.config.mcpServers.oauth.oauth = { basicEnrollment: { version: 1, cohort: "work" } };
+    const { ui, getRendered } = createPanelHarness();
+    await openMcpPanel(state, { getFlag: () => undefined } as any,
+      { hasUI: true, mode: "tui", cwd: "/tmp", ui } as any);
+    expect(getRendered()).not.toContain("needs auth");
+    state.manager.getConnection = () => ({ status: "needs-auth" });
+    await openMcpPanel(state, { getFlag: () => undefined } as any,
+      { hasUI: true, mode: "tui", cwd: "/tmp", ui } as any);
+    expect(getRendered()).toContain("needs auth");
+  });
+
   it.each([
     ["/mcp", openMcpPanel],
     ["/mcp-auth", openMcpAuthPanel],

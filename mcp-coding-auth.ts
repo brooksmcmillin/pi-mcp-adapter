@@ -109,10 +109,19 @@ export function beginCodingSessionReplacement(name: string, url: string, storage
   return () => { replacement.denied = false; replacement.replacementDenied = false }
 }
 
-export function validateCodingConfig(value: unknown): CodingEnrollmentConfig {
+export function validateCodingConfig(value: unknown, key = "codingEnrollment"): CodingEnrollmentConfig {
   const parsed = z.object({ version: z.literal(1), cohort: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) }).strict().safeParse(value)
-  if (!parsed.success) throw new Error("oauth.codingEnrollment requires version: 1 and a non-secret cohort slot (letters, digits, _ or -)")
+  if (!parsed.success) throw new Error(`oauth.${key} requires version: 1 and a non-secret cohort slot (letters, digits, _ or -)`)
   return parsed.data
+}
+
+export function brokerEnrollmentIssuer(url: string): string {
+  const endpoint = new URL(url)
+  if (endpoint.pathname !== "/broker/mcp" || endpoint.search || endpoint.hash || endpoint.username || endpoint.password
+    || (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(endpoint.hostname)))) {
+    throw new Error("Broker enrollment requires the broker /broker/mcp HTTPS endpoint (HTTP is allowed only on loopback)")
+  }
+  return `${endpoint.origin}/broker`
 }
 
 /** Cohort names select private secure-store entries; they are never authority. */
@@ -124,14 +133,9 @@ export class CodingAuthClient {
   readonly issuer: string
 
   constructor(private name: string, private url: string, config: CodingEnrollmentConfig, private storage: AuthStorageOptions) {
-    const endpoint = new URL(url)
-    if (endpoint.pathname !== "/broker/mcp" || endpoint.search || endpoint.hash || endpoint.username || endpoint.password
-      || (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(endpoint.hostname)))) {
-      throw new Error("Coding enrollment requires the broker /broker/mcp HTTPS endpoint (HTTP is allowed only on loopback)")
-    }
     if (storage.persistence !== "session") throw new Error("Coding enrollment requires settings.oauthPersistence: session; access/refresh tokens must never be shared")
     this.assertAuthority = captureOAuthAuthority(name, true, storage)
-    this.issuer = `${endpoint.origin}/broker`
+    this.issuer = brokerEnrollmentIssuer(url)
     this.persistent = { ...(storage.cohortCredentialStore ? { credentialStore: storage.cohortCredentialStore } : {}) }
     this.cohortAccount = `coding-cohort-${createHash("sha256").update(JSON.stringify([url, config.cohort])).digest("hex")}`
     const key = JSON.stringify([name, url, getAuthStorageIdentity(storage), config.cohort])
