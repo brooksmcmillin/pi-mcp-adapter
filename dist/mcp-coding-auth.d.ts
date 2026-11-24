@@ -52,7 +52,8 @@ export declare function getRetainedCodingConfig(name: string, url: string, stora
 export declare function logoutCodingLaunch(name: string, storage: AuthStorageOptions): void;
 /** Retire local enrollment state; only the host's completed reset may activate its successor. */
 export declare function beginCodingSessionReplacement(name: string, url: string, storage: AuthStorageOptions): () => void;
-export declare function validateCodingConfig(value: unknown): CodingEnrollmentConfig;
+export declare function validateCodingConfig(value: unknown, key?: string): CodingEnrollmentConfig;
+export declare function brokerEnrollmentIssuer(url: string): string;
 /** Cohort names select private secure-store entries; they are never authority. */
 export declare class CodingAuthClient {
     private name;

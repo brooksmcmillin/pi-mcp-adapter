@@ -36,6 +36,7 @@ import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@mod
 import { createOAuthFetch, type OAuthFetch } from "./mcp-auth-fetch.ts"
 import { resolveCommandSecret } from "./utils.ts"
 import { getAppClientUri, getAppName } from "./agent-dir.ts"
+import { BasicAuthClient, parseBasicEnrollment, type BasicEnrollment } from "./mcp-basic-auth.ts"
 import { CodingAuthClient, getRetainedCodingConfig, type CodingCredentials, type CodingEnrollmentConfig } from "./mcp-coding-auth.ts"
 import { codingHttpRejection, waitForCodingRenewal, type CodingRenewalPause, type CodingWaitOptions } from "./coding-call-recovery.ts"
 
@@ -131,6 +132,7 @@ export function setOAuthCallbackPath(path: string): void {
 
 /** Configuration options for OAuth */
 export interface McpOAuthConfig {
+  basicEnrollment?: CodingEnrollmentConfig
   codingEnrollment?: CodingEnrollmentConfig
   grantType?: "authorization_code" | "client_credentials" | "device_code"
   clientId?: string
@@ -273,11 +275,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private lastSavedAccessToken: string | undefined
   private pendingAuthAccessToken: string | undefined
   private readonly assertAuthority: OAuthAuthority
+  private basic?: BasicAuthClient
+  private pendingBasic: BasicEnrollment | undefined
   private coding: CodingAuthClient | undefined
   private pendingCodingCredentials: CodingCredentials | undefined
-  private pendingCodingAuthority: OAuthAuthority | undefined
+  private pendingEnrollmentAuthority: OAuthAuthority | undefined
   private codingError: Error | undefined
-  private codingConsentRequested = false
+  private enrollmentConsentRequested = false
 
   constructor(
     private serverName: string,
@@ -295,6 +299,12 @@ export class McpOAuthProvider implements OAuthClientProvider {
       this.clientMetadataUrl = config.clientMetadataUrl
     }
     const codingConfig = config.codingEnrollment ?? getRetainedCodingConfig(serverName, serverUrl, storageOptions)
+    if (config.basicEnrollment) {
+      if (codingConfig || (config.grantType && config.grantType !== "authorization_code") || config.skipIssuerMetadataValidation) {
+        throw new Error("Basic enrollment requires authorization_code, strict issuer validation and no coding enrollment")
+      }
+      this.basic = new BasicAuthClient(serverName, serverUrl, config.basicEnrollment.cohort, storageOptions)
+    }
     if (codingConfig) this.enableCoding(codingConfig)
     this.authFetch = createOAuthFetch(serverUrl, undefined, runtimeSignal)
     this.setAuthFetch(this.authFetch)
@@ -307,8 +317,10 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   setAuthFetch(fetchFn: OAuthFetch): void {
-    if (!this.coding) { this.authFetch = fetchFn; return }
+    const basic = this.basic
     const coding = this.coding
+    const enrollment = basic ?? coding
+    if (!enrollment) { this.authFetch = fetchFn; return }
     this.authFetch = Object.assign(async (input: Parameters<FetchLike>[0], init?: Parameters<FetchLike>[1]) => {
       const request = input instanceof Request ? input : undefined
       const signal = init?.signal ?? request?.signal ?? this.runtimeSignal
@@ -316,12 +328,12 @@ export class McpOAuthProvider implements OAuthClientProvider {
       check()
       const url = new URL(request ? request.url : String(input))
       const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
-      if (url.toString() === `${coding.issuer}/token` && method === "POST") {
+      if (url.toString() === `${enrollment.issuer}/token` && method === "POST") {
         // Normalize all FetchLike body representations without consuming the caller's Request.
         const body = await new Request(request ? request.clone() : input, init).text()
         check()
         const params = new URLSearchParams(body)
-        if (params.get("grant_type") === "refresh_token") {
+        if (coding && params.get("grant_type") === "refresh_token") {
           try {
             const tokens = await coding.tokens(fetchFn, check, signal ?? undefined, "replace")
             check()
@@ -334,15 +346,21 @@ export class McpOAuthProvider implements OAuthClientProvider {
           }
         }
         if (params.get("grant_type") === "authorization_code") {
-          const response = await fetchFn(input, { ...init, redirect: "error" })
+          const response = await fetchFn(input, { ...init, redirect: "error" }).catch(error => {
+            check()
+            if (basic) throw new Error("Broker basic consent exchange failed")
+            throw error
+          })
           check()
+          if (basic && !response.ok) throw new Error("Broker basic consent exchange failed")
           if (response.ok) {
             let payload: unknown
             try { payload = await response.clone().json() }
-            catch { throw new Error("Invalid coding OAuth token response") }
+            catch { throw new Error("Invalid broker OAuth token response") }
             check()
-            this.pendingCodingCredentials = coding.parseCredentials(payload)
-            this.pendingCodingAuthority = check
+            if (basic) this.pendingBasic = parseBasicEnrollment(payload)
+            else this.pendingCodingCredentials = coding!.parseCredentials(payload)
+            this.pendingEnrollmentAuthority = check
           }
           check()
           return response
@@ -350,7 +368,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       }
       const response = await fetchFn(input, init)
       check()
-      if (url.toString() === this.serverUrl && method === "POST" && response.status === 403) {
+      if (coding && url.toString() === this.serverUrl && method === "POST" && response.status === 403) {
         const body = await new Request(request ? request.clone() : input, init).text()
         const rejection = await codingHttpRejection(response, body)
         check()
@@ -369,7 +387,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   private adoptCodingSession(): void {
-    if (this.coding) return
+    if (this.coding || this.basic) return
     const config = getRetainedCodingConfig(this.serverName, this.serverUrl, this.storageOptions)
     if (config) { this.enableCoding(config); this.setAuthFetch(this.authFetch) }
   }
@@ -380,13 +398,14 @@ export class McpOAuthProvider implements OAuthClientProvider {
       return this.authFetch(...args)
     }, { throwIfHeaderResolutionFailed: () => this.authFetch.throwIfHeaderResolutionFailed() })
   }
+  get basicEnrollmentEnabled(): boolean { return this.basic !== undefined }
   get codingEnrollmentEnabled(): boolean { this.adoptCodingSession(); return this.coding !== undefined }
 
   /** Explicit interactive sign-in only; never serve an old bearer to the SDK. */
-  requestCodingConsent(): void {
+  requestEnrollmentConsent(): void {
     this.throwIfInactive()
-    if (!this.coding) throw new Error("Coding consent requires a coding session")
-    this.codingConsentRequested = true
+    if (!this.coding && !this.basic) throw new Error("Consent requires an enrollment session")
+    this.enrollmentConsentRequested = true
   }
 
   runPendingCodingCall<T>(call: () => Promise<T>, options: CodingWaitOptions): Promise<T> {
@@ -418,8 +437,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
 
   deactivate(): void {
     this.active = false
+    this.pendingBasic = undefined
     this.pendingCodingCredentials = undefined
-    this.pendingCodingAuthority = undefined
+    this.pendingEnrollmentAuthority = undefined
     this.invalidatedAccessToken = undefined
     this.invalidatedClientId = undefined
     this.staleRedirectClientId = undefined
@@ -449,6 +469,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private throwIfInactive(): void {
     if (!this.active) throw new Error("OAuth flow is no longer active")
     this.assertAuthority()
+    this.basic?.assertActive()
     this.runtimeSignal?.throwIfAborted()
     // The SDK can swallow refresh fetch errors and attempt browser authorization.
     // A failed service credential must stop that fallback and token persistence.
@@ -682,8 +703,18 @@ export class McpOAuthProvider implements OAuthClientProvider {
   async tokens(ctx?: OAuthClientInformationContext): Promise<OAuthTokens | undefined> {
     this.throwIfInactive()
     this.adoptCodingSession()
+    if (this.basic) {
+      const issuer = ctx?.issuer ?? this.discoveredIssuer
+      if (issuer !== undefined && !issuersMatch(issuer, this.basic.issuer)) throw new Error("Basic OAuth issuer mismatch")
+      if (this.enrollmentConsentRequested) return undefined
+      const tokens = await this.basic.tokens(this.authFetch, () => this.throwIfInactive(), this.runtimeSignal)
+      this.throwIfInactive()
+      if (tokens.accessToken === this.invalidatedAccessToken) throw new Error("Broker basic enrollment exchange failed")
+      this.pendingAuthAccessToken = tokens.accessToken
+      return toOAuthTokens(tokens)
+    }
     if (this.coding) {
-      if (this.codingConsentRequested) return undefined
+      if (this.enrollmentConsentRequested) return undefined
       this.codingError = undefined
       const issuer = ctx?.issuer ?? this.discoveredIssuer
       if (issuer !== undefined && !issuersMatch(issuer, this.coding.issuer)) throw new Error("Coding OAuth issuer mismatch")
@@ -700,7 +731,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     // Use getAuthForUrl to validate tokens are for the current server URL.
     const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
     this.throwIfInactive()
-    if (!entry?.tokens || entry.tokens.accessToken === this.invalidatedAccessToken) return undefined
+    if (!entry?.tokens || entry.tokens.basicEnrollmentSlot !== undefined || entry.tokens.accessToken === this.invalidatedAccessToken) return undefined
     this.invalidatedAccessToken = undefined
     const issuer = this.discoveredIssuer
     this.assertStoredIssuerBindings(entry, issuer)
@@ -721,6 +752,21 @@ export class McpOAuthProvider implements OAuthClientProvider {
    */
   async saveTokens(tokens: OAuthTokens): Promise<void> {
     this.adoptCodingSession()
+    if (this.basic) {
+      this.throwIfInactive()
+      const issuer = this.discoveredIssuer ?? (tokens as IssuerBoundTokens).issuer
+      if (issuer !== undefined && !issuersMatch(issuer, this.basic.issuer)) throw new Error("Basic OAuth issuer mismatch")
+      if (!this.pendingBasic || this.pendingBasic.access_token !== tokens.access_token || !this.enrollmentConsentRequested) {
+        throw new Error("Basic credentials must come from broker consent")
+      }
+      this.pendingEnrollmentAuthority!()
+      this.basic.install(this.pendingBasic)
+      this.lastSavedAccessToken = tokens.access_token
+      this.pendingBasic = undefined
+      this.pendingEnrollmentAuthority = undefined
+      this.enrollmentConsentRequested = false
+      return
+    }
     if (this.coding) {
       this.throwIfInactive()
       const issuer = this.discoveredIssuer ?? (tokens as IssuerBoundTokens).issuer
@@ -728,11 +774,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
       const pending = this.pendingCodingCredentials
       if (pending) {
         if (pending.access_token !== tokens.access_token || pending.refresh_token !== tokens.refresh_token) throw new Error("Coding OAuth credential response mismatch")
-        this.pendingCodingAuthority!()
-        this.coding.install(pending, this.pendingCodingAuthority!)
-        this.codingConsentRequested = false
+        this.pendingEnrollmentAuthority!()
+        this.coding.install(pending, this.pendingEnrollmentAuthority!)
+        this.enrollmentConsentRequested = false
         this.pendingCodingCredentials = undefined
-        this.pendingCodingAuthority = undefined
+        this.pendingEnrollmentAuthority = undefined
       } else if (getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)?.tokens?.accessToken !== tokens.access_token) {
         throw new Error("Coding credentials must come from broker API v1")
       }
@@ -871,6 +917,11 @@ export class McpOAuthProvider implements OAuthClientProvider {
     this.throwIfInactive()
     switch (type) {
       case "all":
+        if (this.basic) {
+          this.pendingBasic = undefined
+          this.pendingEnrollmentAuthority = undefined
+          this.enrollmentConsentRequested = false
+        }
         this.coding?.logout()
         this.flowClientInfo = undefined
         this.flowCodeVerifier = undefined
@@ -900,6 +951,8 @@ export class McpOAuthProvider implements OAuthClientProvider {
         // that another process just authorized. A later tokens() call bypasses
         // the local cache and adopts a replacement token when one exists.
         this.invalidatedAccessToken = this.pendingAuthAccessToken ?? this.lastSavedAccessToken
+        // Basic bearers are launch-local: expire the observed session, not its reusable proof.
+        this.basic?.invalidateAccessToken(this.invalidatedAccessToken)
         this.lastSavedAccessToken = undefined
         this.pendingAuthAccessToken = undefined
         if (this.staleRedirectClientId !== undefined) {

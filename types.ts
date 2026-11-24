@@ -399,6 +399,8 @@ export type ContentBlock = TextContent | ImageContent;
 export interface OAuthConfig {
   /** Opt-in broker API v1; cohort is a non-secret private credential-store slot. Requires session persistence. */
   codingEnrollment?: { version: 1; cohort: string };
+  /** Independent default sessions using a private basic host enrollment proof. */
+  basicEnrollment?: { version: 1; cohort: string };
   /** OAuth grant type (defaults to authorization_code) */
   grantType?: "authorization_code" | "client_credentials" | "device_code";
   /** Pre-registered client ID (optional, dynamic registration used if not provided) */

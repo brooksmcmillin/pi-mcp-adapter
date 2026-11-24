@@ -446,6 +446,22 @@ describe("proxy auto auth", () => {
     expect(result.content[0].text).toContain("ok");
   });
 
+  it("does not request new consent from a proxy call after basic proof rejection", async () => {
+    const { executeCall } = await import("../proxy-modes.ts");
+    const definition = { url: "https://example.test/broker/mcp", auth: "oauth", oauth: { basicEnrollment: { version: 1, cohort: "work" } } };
+    mocks.authenticate.mockImplementationOnce(async (_name, _url, _def, options) => {
+      if (options.firstBasicEnrollmentOnly) throw new Error("Run /mcp-auth demo for fresh consent");
+      throw new Error("Unexpected interactive retry");
+    });
+    const result = await executeCall({
+      config: { settings: { autoAuth: true }, mcpServers: { demo: definition } },
+      manager: { getConnection: () => ({ status: "needs-auth" }), touch() {}, incrementInFlight() {}, decrementInFlight() {} },
+      toolMetadata: new Map([["demo", [{ name: "demo_search", originalName: "search" }]]]),
+      failureTracker: new Map(), ui: { setStatus() {} }, completedUiSessions: [],
+    } as any, "demo_search", {}, "demo");
+    expect(result.content[0].text).toContain("/mcp-auth demo");
+  });
+
   it("rethrows proxy auto-auth cancellation", async () => {
     const { executeCall } = await import("../proxy-modes.ts");
     const controller = new AbortController();

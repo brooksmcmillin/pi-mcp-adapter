@@ -12,12 +12,15 @@
 export type OAuthAuthority = () => void;
 /** Capture immutable process-local authority for one server's OAuth lifecycle. */
 export declare function captureOAuthAuthority(serverName: string, assertNow?: boolean, options?: AuthStorageOptions): OAuthAuthority;
+/** Basic consent and proof exchanges must not install after an SDK credential clear. */
+export declare function captureBasicEnrollmentAuthority(serverName: string, options: AuthStorageOptions, consentKey?: string): OAuthAuthority;
 /** Begin an overlap-safe process-local logout interval. */
 export declare function beginOAuthRevocation(serverName: string, options?: AuthStorageOptions): () => void;
 /** OAuth token storage format */
 export interface StoredTokens {
     accessToken: string;
     refreshToken?: string;
+    basicEnrollmentSlot?: string;
     expiresAt?: number;
     scope?: string;
     /** SEP-2352 authorization-server issuer binding */
@@ -107,6 +110,8 @@ export declare function getAuthBaseDir(options?: AuthStorageOptions): string;
  * Get the legacy plaintext tokens file path for a server.
  */
 export declare function getAuthEntryFilePath(serverName: string, options?: AuthStorageOptions): string;
+/** Enrollment proofs have no legacy plaintext representation. Read fresh from the secure backend. */
+export declare function readBasicEnrollmentProof(account: string, url: string, storage: AuthStorageOptions): string | undefined;
 /**
  * Get auth entry for a server.
  */
@@ -121,7 +126,7 @@ export declare function getAuthForUrl(serverName: string, serverUrl: string, opt
  * secure store as missing credentials. Authentication operations continue to
  * use getAuthForUrl() directly and therefore remain fail-closed.
  */
-export declare function inspectAuthForUrl(serverName: string, serverUrl: string, options?: AuthStorageOptions): OAuthCredentialStatus;
+export declare function inspectAuthForUrl(serverName: string, serverUrl: string, options?: AuthStorageOptions, basicEnrollmentSlot?: string): OAuthCredentialStatus;
 /**
  * Save auth entry for a server.
  */

@@ -14,6 +14,7 @@ export interface McpOAuthRuntime {
     readonly signal: AbortSignal;
 }
 export interface AuthenticateOptions {
+    firstBasicEnrollmentOnly?: boolean;
     onDeviceAuthorization?: DeviceAuthOptions["onDeviceAuthorization"];
     onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>;
     openAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>;
@@ -94,7 +95,9 @@ export declare function getValidToken(serverName: string, serverUrl: string, opt
  * @param serverName - The name of the MCP server
  * @returns The current auth status
  */
-export declare function getAuthStatus(serverName: string, options?: AuthenticateOptions): Promise<AuthStatus>;
+export declare function getAuthStatus(serverName: string, options?: AuthenticateOptions & {
+    serverUrl?: string;
+}): Promise<AuthStatus>;
 /**
  * Remove all OAuth credentials for a server.
  *

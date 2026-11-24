@@ -243,6 +243,11 @@ export interface OAuthConfig {
         version: 1;
         cohort: string;
     };
+    /** Independent default sessions using a private basic host enrollment proof. */
+    basicEnrollment?: {
+        version: 1;
+        cohort: string;
+    };
     /** OAuth grant type (defaults to authorization_code) */
     grantType?: "authorization_code" | "client_credentials" | "device_code";
     /** Pre-registered client ID (optional, dynamic registration used if not provided) */

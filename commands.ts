@@ -28,7 +28,7 @@ import { markKeepAliveAfterConnect, notifyToolMetadataUpdated, updateMetadataCac
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { loadMetadataCache, reconstructPromptMetadata, withSessionMetadata } from "./metadata-cache.ts";
 import { buildToolMetadata, cacheReader, executorAppToolsLine, executorAppToolsStatus, executorCatalogNotes, ownTools } from "./tool-metadata.ts";
-import { authenticate, removeAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
+import { authenticate, removeAuth, type AuthenticateOptions, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { getAuthStorageOptions, inspectAuthForUrl, type AuthStorageOptions } from "./mcp-auth.ts";
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
@@ -436,6 +436,7 @@ export async function authenticateServer(
   signal?: AbortSignal,
   runtime?: McpOAuthRuntime,
   sharedAuthStorageOptions?: AuthStorageOptions,
+  enrollmentOptions: Pick<AuthenticateOptions, "firstBasicEnrollmentOnly"> = {},
 ): Promise<McpAuthResult> {
   const ui = ctx.hasUI ? ctx.ui : undefined;
   const cwd = ctx.cwd;
@@ -485,6 +486,7 @@ export async function authenticateServer(
       config.settings?.oauthCredentialStore,
     );
     const status = await authenticate(serverName, serverUrl, definition, {
+      ...enrollmentOptions,
       ...(Object.keys(authStorageOptions).length > 0 ? { authStorageOptions } : {}),
       onAuthorizationUrl: () => {},
       onDeviceAuthorization: ({ verificationUri, userCode }, pairingSignal, cancel) => {
@@ -824,6 +826,7 @@ function buildMcpPanelCallbacks(
         && serverUrl
         && definition.oauth !== false
         && definition.oauth?.grantType !== "client_credentials"
+        && !definition.oauth?.basicEnrollment
       ) {
         const authStatus = inspectAuthForUrl(serverName, serverUrl, state.authStorageOptions);
         if (authStatus.status === "unavailable") {

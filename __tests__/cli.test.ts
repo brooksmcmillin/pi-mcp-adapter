@@ -557,6 +557,36 @@ describe("cli doctor", { timeout: 30_000 }, () => {
     expect(paths.every((path) => path === "/mcp")).toBe(true);
   });
 
+  it("checks an enrolled basic server from a fresh doctor process", async () => {
+    let exchanges = 0;
+    const url = (await listen((request, response) => {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        if (request.url === "/broker/token" && new URLSearchParams(body).get("basic_enrollment_token") === "test-proof") {
+          exchanges++;
+          response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ version: 1, scope: "profile:default", token_type: "Bearer", access_token: "test-access", expires_at: new Date(Date.now() + 60000).toISOString() }));
+          return;
+        }
+        if (request.headers.authorization !== "Bearer test-access") { response.writeHead(401).end(); return; }
+        const message = body ? JSON.parse(body) : {};
+        if (message.id === undefined) { response.writeHead(request.method === "POST" ? 202 : 405).end(); return; }
+        const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "basic", version: "1" } } : { tools: [] };
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+      });
+    })).replace("/mcp", "/broker/mcp");
+    const context = setup({ settings: { oauthPersistence: "session", oauthCredentialStore: "encrypted-file" }, mcpServers: { basic: { url, auth: "oauth", oauth: { basicEnrollment: { version: 1, cohort: "work" } } } } });
+    const env = { PI_MCP_ADAPTER_OAUTH_FILE_KEY: Buffer.alloc(32, 7).toString("base64") };
+    const seed = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+      import { BasicAuthClient } from ${JSON.stringify(pathToFileURL(resolve("dist/mcp-basic-auth.js")).href)};
+      import { getAuthStorageOptions } from ${JSON.stringify(pathToFileURL(resolve("dist/mcp-auth.js")).href)};
+      new BasicAuthClient('basic', ${JSON.stringify(url)}, 'work', getAuthStorageOptions(undefined, process.cwd(), 'session', 'encrypted-file')).install({ version: 1, scope: 'profile:default', token_type: 'Bearer', access_token: 'old-access', expires_at: new Date(Date.now()+60000).toISOString(), basic_enrollment_token: 'test-proof' });`], { env: { ...process.env, HOME: context.home, PI_CODING_AGENT_DIR: context.agentDir, ...env }, encoding: "utf-8" });
+    expect(seed.status, seed.stderr).toBe(0);
+    const result = await doctor([], context, env);
+    expect(result.stdout).toContain("basic: ok");
+    expect(exchanges).toBe(1);
+  });
+
   it("reports auth.provider servers as needing a Pi sign-in without connecting", async () => {
     let requests = 0;
     const url = await listen((_request, response) => {

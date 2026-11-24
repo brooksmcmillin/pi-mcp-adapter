@@ -48,6 +48,8 @@ export type OAuthAuthority = () => void;
 type OAuthLifecycleRecord = {
   generation: object;
   revocations: number;
+  basicConsentKeys?: Set<string>;
+  basicCleared?: boolean;
 };
 
 // Captured providers/fetches can outlive a module reload; their fences must too.
@@ -82,6 +84,19 @@ export function captureOAuthAuthority(serverName: string, assertNow = true, opti
   return assertAuthority;
 }
 
+/** Basic consent and proof exchanges must not install after an SDK credential clear. */
+export function captureBasicEnrollmentAuthority(serverName: string, options: AuthStorageOptions, consentKey?: string): OAuthAuthority {
+  const record = getOAuthLifecycleRecord(serverName, options);
+  const generation = record.basicConsentKeys ??= new Set();
+  if (consentKey !== undefined && !generation.has(consentKey)) {
+    if (record.basicCleared) options.sessionEntries?.set(consentKey, '1');
+    generation.add(consentKey);
+  }
+  return () => {
+    if (generation !== record.basicConsentKeys) throw new Error('Basic enrollment is no longer active');
+  };
+}
+
 /** Begin an overlap-safe process-local logout interval. */
 export function beginOAuthRevocation(serverName: string, options: AuthStorageOptions = {}): () => void {
   const record = getOAuthLifecycleRecord(serverName, options);
@@ -99,6 +114,7 @@ export function beginOAuthRevocation(serverName: string, options: AuthStorageOpt
 export interface StoredTokens {
   accessToken: string;
   refreshToken?: string;
+  basicEnrollmentSlot?: string;
   expiresAt?: number; // Unix timestamp in seconds
   scope?: string;
   /** SEP-2352 authorization-server issuer binding */
@@ -811,6 +827,7 @@ function toStoredTokens(value: unknown): StoredTokens | undefined {
   if (refreshToken === null || scope === null || issuer === null || expiresAt === null) return undefined;
 
   const storedTokens: StoredTokens = { accessToken: tokens.accessToken };
+  if (typeof tokens.basicEnrollmentSlot === 'string') storedTokens.basicEnrollmentSlot = tokens.basicEnrollmentSlot;
   if (refreshToken !== undefined) storedTokens.refreshToken = refreshToken;
   if (expiresAt !== undefined) storedTokens.expiresAt = expiresAt;
   if (scope !== undefined) storedTokens.scope = scope;
@@ -1072,7 +1089,7 @@ function readAuthEntryFromStore(
   store: AuthSecretStore,
   serverName: string,
   options?: AuthStorageOptions,
-  behavior: { migrateLegacy?: boolean } = {},
+  behavior: { migrateLegacy?: boolean; secureOnly?: boolean } = {},
 ): AuthEntry | undefined {
   const account = getAuthEntryAccount(serverName);
   let payload: string | undefined;
@@ -1101,7 +1118,7 @@ function readAuthEntryFromStore(
     return entry;
   }
 
-  if (store.kind === 'encrypted-file') return undefined;
+  if (behavior.secureOnly || store.kind === 'encrypted-file') return undefined;
   const legacyEntry = readLegacyAuthEntry(serverName, options);
   if (!legacyEntry) return undefined;
   if (behavior.migrateLegacy === false) return legacyEntry;
@@ -1113,7 +1130,7 @@ function readAuthEntryFromStore(
 function readAuthEntry(
   serverName: string,
   options?: AuthStorageOptions,
-  behavior: { migrateLegacy?: boolean } = {},
+  behavior: { migrateLegacy?: boolean; secureOnly?: boolean } = {},
 ): AuthEntry | undefined {
   // Status-only reads deliberately bypass the cache because they do not
   // migrate legacy entries.
@@ -1133,6 +1150,12 @@ function readAuthEntry(
 
   if (cacheable) authEntryCache.set(cacheKey, cloneAuthEntry(entry));
   return entry;
+}
+
+/** Enrollment proofs have no legacy plaintext representation. Read fresh from the secure backend. */
+export function readBasicEnrollmentProof(account: string, url: string, storage: AuthStorageOptions): string | undefined {
+  const entry = readAuthEntry(account, storage, { secureOnly: true, migrateLegacy: false });
+  return entry?.serverUrl === url ? entry.cohortCredential : undefined;
 }
 
 /**
@@ -1168,10 +1191,11 @@ export function inspectAuthForUrl(
   serverName: string,
   serverUrl: string,
   options?: AuthStorageOptions,
+  basicEnrollmentSlot?: string,
 ): OAuthCredentialStatus {
   try {
     const entry = readAuthEntry(serverName, options, { migrateLegacy: false });
-    if (!entry?.serverUrl || entry.serverUrl !== serverUrl) return { status: 'absent' };
+    if (!entry?.serverUrl || entry.serverUrl !== serverUrl || entry.tokens?.basicEnrollmentSlot !== basicEnrollmentSlot) return { status: 'absent' };
     return { status: 'present', entry };
   } catch (error) {
     if (!(error instanceof OAuthCredentialStoreError)) throw error;
@@ -1370,6 +1394,11 @@ export function hasStoredTokens(serverName: string, options?: AuthStorageOptions
  * Clear all credentials for a server.
  */
 export function clearAllCredentials(serverName: string, options?: AuthStorageOptions): void {
+  if (options?.sessionEntries) {
+    const record = getOAuthLifecycleRecord(serverName, options);
+    record.basicCleared = true;
+    delete record.basicConsentKeys;
+  }
   removeAuthEntry(serverName, options);
 }
 

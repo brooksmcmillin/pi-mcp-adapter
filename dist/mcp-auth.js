@@ -70,6 +70,20 @@ export function captureOAuthAuthority(serverName, assertNow = true, options = {}
         assertAuthority();
     return assertAuthority;
 }
+/** Basic consent and proof exchanges must not install after an SDK credential clear. */
+export function captureBasicEnrollmentAuthority(serverName, options, consentKey) {
+    const record = getOAuthLifecycleRecord(serverName, options);
+    const generation = record.basicConsentKeys ??= new Set();
+    if (consentKey !== undefined && !generation.has(consentKey)) {
+        if (record.basicCleared)
+            options.sessionEntries?.set(consentKey, '1');
+        generation.add(consentKey);
+    }
+    return () => {
+        if (generation !== record.basicConsentKeys)
+            throw new Error('Basic enrollment is no longer active');
+    };
+}
 /** Begin an overlap-safe process-local logout interval. */
 export function beginOAuthRevocation(serverName, options = {}) {
     const record = getOAuthLifecycleRecord(serverName, options);
@@ -700,6 +714,8 @@ function toStoredTokens(value) {
     if (refreshToken === null || scope === null || issuer === null || expiresAt === null)
         return undefined;
     const storedTokens = { accessToken: tokens.accessToken };
+    if (typeof tokens.basicEnrollmentSlot === 'string')
+        storedTokens.basicEnrollmentSlot = tokens.basicEnrollmentSlot;
     if (refreshToken !== undefined)
         storedTokens.refreshToken = refreshToken;
     if (expiresAt !== undefined)
@@ -968,7 +984,7 @@ function readAuthEntryFromStore(store, serverName, options, behavior = {}) {
         }
         return entry;
     }
-    if (store.kind === 'encrypted-file')
+    if (behavior.secureOnly || store.kind === 'encrypted-file')
         return undefined;
     const legacyEntry = readLegacyAuthEntry(serverName, options);
     if (!legacyEntry)
@@ -1000,6 +1016,11 @@ function readAuthEntry(serverName, options, behavior = {}) {
         authEntryCache.set(cacheKey, cloneAuthEntry(entry));
     return entry;
 }
+/** Enrollment proofs have no legacy plaintext representation. Read fresh from the secure backend. */
+export function readBasicEnrollmentProof(account, url, storage) {
+    const entry = readAuthEntry(account, storage, { secureOnly: true, migrateLegacy: false });
+    return entry?.serverUrl === url ? entry.cohortCredential : undefined;
+}
 /**
  * Get auth entry for a server.
  */
@@ -1027,10 +1048,10 @@ export function getAuthForUrl(serverName, serverUrl, options) {
  * secure store as missing credentials. Authentication operations continue to
  * use getAuthForUrl() directly and therefore remain fail-closed.
  */
-export function inspectAuthForUrl(serverName, serverUrl, options) {
+export function inspectAuthForUrl(serverName, serverUrl, options, basicEnrollmentSlot) {
     try {
         const entry = readAuthEntry(serverName, options, { migrateLegacy: false });
-        if (!entry?.serverUrl || entry.serverUrl !== serverUrl)
+        if (!entry?.serverUrl || entry.serverUrl !== serverUrl || entry.tokens?.basicEnrollmentSlot !== basicEnrollmentSlot)
             return { status: 'absent' };
         return { status: 'present', entry };
     }
@@ -1213,6 +1234,11 @@ export function hasStoredTokens(serverName, options) {
  * Clear all credentials for a server.
  */
 export function clearAllCredentials(serverName, options) {
+    if (options?.sessionEntries) {
+        const record = getOAuthLifecycleRecord(serverName, options);
+        record.basicCleared = true;
+        delete record.basicConsentKeys;
+    }
     removeAuthEntry(serverName, options);
 }
 /**

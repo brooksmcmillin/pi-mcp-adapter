@@ -143,6 +143,21 @@ authorization-code servers; use `/mcp-auth` for interactive short-code pairing.
 Contract tests consume a byte-identical synthetic broker fixture from
 `infra@a391ecb38f73f1997917beb080065587b95156c5:scripts/tests/fixtures/broker-device-flow.json`.
 
+### Basic host enrollment (broker API v1)
+
+For independent default-profile sessions, set `auth: "oauth"` and
+`oauth.basicEnrollment: { "version": 1, "cohort": "work" }` on the broker's
+`/broker/mcp` entry, and `settings.oauthPersistence: "session"`. The cohort is
+only a non-secret storage slot. Do not combine this with coding enrollment.
+
+On first use run `/mcp-auth`, select **default** in the broker consent form,
+check **basic host enrollment**, and approve with TOTP. Only the reusable proof
+persists in the OS credential store (or configured encrypted-file store). Each
+later launch exchanges it for a new default session; no bearer, refresh token,
+prior session grants, or elevation carry over. If the proof is lost or revoked,
+repeat explicit consent. Broker revocation stops future exchanges, not already
+issued sessions. Never put the proof in config or prompts.
+
 ### Shared coding enrollment (broker API v1)
 
 Opt in only for a broker implementing coding enrollment v1:
@@ -394,7 +409,7 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 Persistent OAuth entries are stored per configured server name in the operating system credential store, using macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret through `@napi-rs/keyring`. The stored entry contains tokens, dynamic client information, legacy verifier/state fields when present, and the server URL binding.
 
-With `settings.oauthPersistence: "session"`, an explicit `--mcp-config` CLI launch owns an in-memory credential namespace keyed by its resolved config path and OAuth directory. It survives extension `/reload` and conversation replacement, including `/resume`, even when Pi replaces the session manager. Different config paths and processes remain isolated. Without that CLI flag, storage remains owned by the Pi session manager. Programmatic `createMcpAdapter({ configPath })` and inline-config factories also remain manager-owned, even under ambient CLI arguments: separate SDK session managers cannot read or overwrite one another's credentials, even for the same server name and URL. Tokens and dynamic client registration are retained; transports, callbacks, and pending authorization flows are still cancelled and rebuilt. Server-name and URL binding remain enforced. Hosts without a session manager retain isolated adapter-local storage. Logout clears the server's credentials, and process exit discards all memory. Ordinary session OAuth never reads, migrates, removes, or writes persistent or legacy credentials. Explicit shared coding enrollment persists only its cohort proof, as described above. Session mode keeps access/refresh credentials in memory regardless of `settings.oauthCredentialStore`.
+With `settings.oauthPersistence: "session"`, an explicit `--mcp-config` CLI launch owns an in-memory credential namespace keyed by its resolved config path and OAuth directory. It survives extension `/reload` and conversation replacement, including `/resume`, even when Pi replaces the session manager. Different config paths and processes remain isolated. Without that CLI flag, storage remains owned by the Pi session manager. Programmatic `createMcpAdapter({ configPath })` and inline-config factories also remain manager-owned, even under ambient CLI arguments: separate SDK session managers cannot read or overwrite one another's credentials, even for the same server name and URL. Tokens and dynamic client registration are retained; transports, callbacks, and pending authorization flows are still cancelled and rebuilt. Server-name and URL binding remain enforced. Hosts without a session manager retain isolated adapter-local storage. Logout clears the server's credentials, and process exit discards all memory. Ordinary session OAuth never reads, migrates, removes, or writes persistent or legacy credentials. Explicit basic and coding enrollments persist only their respective reusable proofs, as described above. Session mode keeps access/refresh credentials in memory regardless of `settings.oauthCredentialStore`.
 
 A broker launcher identity may already be bound to an OAuth session. If its credentials are genuinely lost or revoked, exit Pi and start a fresh launcher invocation with a new identity before pairing again; repeated authentication under the old identity is not a recovery mechanism.
 

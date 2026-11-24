@@ -20,6 +20,7 @@ export declare function getOAuthCallbackPath(): string;
 export declare function setOAuthCallbackPath(path: string): void;
 /** Configuration options for OAuth */
 export interface McpOAuthConfig {
+    basicEnrollment?: CodingEnrollmentConfig;
     codingEnrollment?: CodingEnrollmentConfig;
     grantType?: "authorization_code" | "client_credentials" | "device_code";
     clientId?: string;
@@ -65,20 +66,23 @@ export declare class McpOAuthProvider implements OAuthClientProvider {
     private lastSavedAccessToken;
     private pendingAuthAccessToken;
     private readonly assertAuthority;
+    private basic?;
+    private pendingBasic;
     private coding;
     private pendingCodingCredentials;
-    private pendingCodingAuthority;
+    private pendingEnrollmentAuthority;
     private codingError;
-    private codingConsentRequested;
+    private enrollmentConsentRequested;
     constructor(serverName: string, serverUrl: string, config: McpOAuthConfig, callbacks: McpOAuthCallbacks, storageOptions?: AuthStorageOptions, runtimeSignal?: AbortSignal | undefined, initialState?: string, authority?: OAuthAuthority);
     setAuthFetch(fetchFn: OAuthFetch): void;
     /** Use the same credential-aware fetch in the SDK and transport. */
     private enableCoding;
     private adoptCodingSession;
     getAuthFetch(): OAuthFetch;
+    get basicEnrollmentEnabled(): boolean;
     get codingEnrollmentEnabled(): boolean;
     /** Explicit interactive sign-in only; never serve an old bearer to the SDK. */
-    requestCodingConsent(): void;
+    requestEnrollmentConsent(): void;
     runPendingCodingCall<T>(call: () => Promise<T>, options: CodingWaitOptions): Promise<T>;
     waitForCodingConnectionRenewal(pause: CodingRenewalPause, options: CodingWaitOptions): Promise<void>;
     private get usesClientCredentials();

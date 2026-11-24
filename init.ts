@@ -492,7 +492,7 @@ export async function initializeMcp(
       if (typeof result.definition.auth === "object" || manager.getConnection(result.name)?.status !== "needs-auth") continue;
       const auth = await authenticateServer(
         result.name, config, { hasUI, ui: ui!, cwd, signal: runtimeSignal },
-        runtimeSignal, oauthRuntime, authStorageOptions,
+        runtimeSignal, oauthRuntime, authStorageOptions, { firstBasicEnrollmentOnly: true },
       );
       owner.throwIfInactive();
       throwIfAborted(runtimeSignal);

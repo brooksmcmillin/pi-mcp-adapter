@@ -573,7 +573,8 @@ async function runDoctor(argv, log, error) {
         return { state: "failed", message: missing.length > 0 ? `URL uses unset environment variables: ${missing.join(", ")}` : "URL is invalid" };
       }
       // Report a missing sign-in from stored credentials instead of starting OAuth.
-      if (utils.supportsOAuth(definition)) {
+      // Basic enrollment exchanges its proof during connect; a fresh process has no bearer yet.
+      if (utils.supportsOAuth(definition) && !definition.oauth?.basicEnrollment) {
         const stored = auth.inspectAuthForUrl(name, url, authOptions);
         if (stored.status === "unavailable") return { state: "failed", message: stored.message };
         // A record without tokens is an unfinished sign-in.
