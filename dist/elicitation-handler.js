@@ -1,6 +1,5 @@
 import { DEFAULT_REQUEST_TIMEOUT_MSEC, ProtocolError, ProtocolErrorCode, SdkError, SdkErrorCode, } from "@modelcontextprotocol/client";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
-import open from "open";
 import { randomUUID } from "node:crypto";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals } from "./runtime-owner.js";
@@ -430,7 +429,7 @@ export async function handleUrlElicitation(options, params, signal) {
     if (decision === "Decline")
         return { action: "decline" };
     try {
-        await abortable(open(params.url), signal);
+        await abortable(options.openUrl(params.url), signal);
     }
     catch (error) {
         throwIfAborted(signal);

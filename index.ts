@@ -37,6 +37,7 @@ import { createRetryableLoader } from "./lazy-loader.ts";
 import { toToolParameters } from "./tool-parameters.ts";
 import { readPanelOpenKeys } from "./panel-keys.ts";
 import { getAgentPath } from "./agent-dir.ts";
+import { routeSdkWarningsToLog } from "./sdk-warnings.ts";
 import { showUpgradeNotice } from "./upgrade-notice.ts";
 
 export type { McpAdapterOptions } from "./types.ts";
@@ -269,6 +270,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   if (!programmaticConfig) setPiMcpConfigEnabled(piSupportsMcp(pi));
   let state: McpExtensionState | null = null;
   let sessionCtx: ExtensionContext | null = null;
+  let releaseSdkWarnings: (() => void) | undefined;
   let initPromise: Promise<McpExtensionState> | null = null;
   let initStartedPromise: Promise<void> | null = null;
   let currentOwner: McpRuntimeOwner | null = null;
@@ -480,6 +482,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   let scriptToolSurfaceIssues: string[] = [];
   // The script-tool issues this session already showed, so a re-sync never repeats one.
   let deliveredScriptToolIssues = new Set<string>();
+  let sessionStartedOnce = false;
   // Session/runtime scoped server registrations from other extensions. They
   // survive session restarts within this install and die with the process.
   const runtimeServers = new Map<string, { definition: ServerEntry; entry: ServerEntry }>();
@@ -496,6 +499,20 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     const idleOverride = definition.idleTimeout ?? (persistsAfterFirstSpawn ? 0 : undefined);
     targetState.lifecycle.registerServer(name, definition, idleOverride === undefined ? undefined : { idleTimeout: idleOverride });
     if (lifecycleMode === "keep-alive") targetState.lifecycle.markKeepAlive(name, definition);
+  }
+
+  // Startup loads configured servers' tool metadata; a runtime server joins later, so it loads its own.
+  function loadRuntimeServerMetadata(targetState: McpExtensionState, name: string, entry: ServerEntry): void {
+    const guard = captureRuntimeGuard(targetState);
+    void loadForRuntime(loadCoreRuntime, guard)
+      .then((core) => {
+        if (targetState.config.mcpServers[name] === entry) return core.loadAddedServerMetadata(targetState, name);
+      })
+      .catch((error) => {
+        if (!isAbortError(error, guard.owner?.signal)) {
+          logger.debug(`MCP: could not load tools of runtime server ${name}: ${formatTerminalError(error)}`);
+        }
+      });
   }
 
   function directToolFingerprint(spec: DirectToolSpec): string {
@@ -1069,8 +1086,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     if (ctx && state) deliverScriptToolIssues(ctx, scriptToolIssuesOf(state));
   }
 
-  // Shows each script-tool issue once per session, whichever sync found it.
+  // Shows each script-tool or server config issue once per session, whichever sync found it.
+  // Load-time initialization has no session to show them in; the session's own config load delivers them.
   function deliverScriptToolIssues(ctx: ExtensionContext, issues: readonly string[]): void {
+    if (!sessionStartedOnce) return;
     for (const issue of issues) {
       if (deliveredScriptToolIssues.has(issue)) continue;
       deliveredScriptToolIssues.add(issue);
@@ -1207,6 +1226,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       registeredState.config.mcpServers[name] = entry;
       attachRuntimeServerLifecycle(registeredState, name, entry);
       syncToolSurface();
+      loadRuntimeServerMetadata(registeredState, name, entry);
       const guard = captureRuntimeGuard(registeredState);
       void loadForRuntime(loadCoreRuntime, guard)
         .then(({ updateStatusBar }) => updateStatusBar(registeredState))
@@ -1226,6 +1246,12 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         if (!currentState || currentState.config.mcpServers[name] !== entry) return;
         delete currentState.config.mcpServers[name];
         currentState.lifecycle.unregisterServer(name);
+        // Search and list read these maps, not the config, so a disposed server's tools would stay findable.
+        currentState.toolMetadata.delete(name);
+        currentState.resourceCounts?.delete(name);
+        currentState.promptMetadata?.delete(name);
+        currentState.promptMetadataLive?.delete(name);
+        currentState.serverInstructions?.delete(name);
         const guard = captureRuntimeGuard(currentState);
         await currentState.manager.close(name);
         assertRuntimeGuard(guard);
@@ -1530,6 +1556,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           nextState.config.mcpServers[name] = entry;
           guard();
           callReentrant(() => attachRuntimeServerLifecycle(nextState, name, entry));
+          loadRuntimeServerMetadata(nextState, name, entry);
         }
         guard();
         void callReentrant(() => applyPiMcpServers(nextState, ctx));
@@ -1680,6 +1707,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCtx = null;
+    if (ctx.mode === "tui") releaseSdkWarnings ??= routeSdkWarningsToLog();
     // A host that embeds the adapter with its own config ships it inside another package; its users never installed this one.
     if (options.config === undefined && options.configPath === undefined) {
       void showUpgradeNotice(ctx).catch((error) => console.error(`MCP: failed to show the upgrade notice: ${formatTerminalError(error)}`));
@@ -1690,6 +1718,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     // A config file's issues arrive with the session's config load: the deferred snapshot or initialization.
     sessionScriptToolIssues = programmaticConfig ? supplied?.issues ?? [] : [];
     deliveredScriptToolIssues = new Set(sessionScriptToolIssues);
+    sessionStartedOnce = true;
     if (ctx.hasUI) {
       for (const notice of [...sessionMigrationNotices, ...sessionScriptToolIssues]) ctx.ui.notify(notice, "warning");
     } else {
@@ -1737,7 +1766,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       void import("./pi-builtin-mcp.ts")
         .then(({ turnOffPiBuiltinMcp }) => turnOffPiBuiltinMcp())
         .then((turnedOff) => {
-          if (turnedOff) report("Turned off Pi's built-in MCP so it doesn't run next to pi-mcp-adapter. If you remove the adapter, turn it back on in `pi config` → Built-in.", "info");
+          // "warning", not "info": Pi renders info dim, and this line sits between two copies of Pi's own warning.
+          if (turnedOff) report("Turned off Pi's built-in MCP so it doesn't run next to pi-mcp-adapter. Pi's `builtin:mcp` warning about `/mcp` needs no action and won't show next start. To go back to Pi's built-in MCP, remove the adapter (for example `pi remove npm:pi-mcp-adapter`), then turn `mcp` back on in `pi config` → Built-in extensions.", "warning");
         })
         .catch((error) => report(`MCP: could not turn off Pi's built-in MCP: ${formatTerminalError(error)}`, "warning"));
     }
@@ -1850,6 +1880,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
   pi.on("session_shutdown", async () => {
     sessionCtx = null;
+    releaseSdkWarnings?.();
+    releaseSdkWarnings = undefined;
     ++lifecycleGeneration;
     const currentState = state;
     const owner = currentOwner;
@@ -2234,7 +2266,13 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             break;
           }
           commandOwner?.throwIfInactive();
-          const result = writeProjectServerDisabledOverride(earlyConfigPath, commandCtx.cwd, serverName, subcommand === "disable");
+          let result: ReturnType<typeof writeProjectServerDisabledOverride>;
+          try {
+            result = writeProjectServerDisabledOverride(earlyConfigPath, commandCtx.cwd, serverName, subcommand === "disable");
+          } catch (error) {
+            commandCtx.ui?.notify(`Failed to ${subcommand} server "${serverName}": ${error instanceof Error ? error.message : String(error)}`, "error");
+            break;
+          }
           if (result.changed) {
             commandCtx.ui?.notify(`${subcommand === "disable" ? "Disabled" : "Enabled"} server "${serverName}" in ${result.path} — run /reload to apply`, "info");
           } else {
@@ -2334,6 +2372,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         serverName,
         state.config,
         commandCtx,
+        state.openBrowser,
         commandCtx.signal,
         state.oauthRuntime,
         state.authStorageOptions,

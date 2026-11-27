@@ -482,6 +482,7 @@ async function attemptAutoAuth(
       ...(signal && { signal }),
       ...(state.authStorageOptions && { authStorageOptions: state.authStorageOptions }),
       ...(definition.oauth && definition.oauth.basicEnrollment && { firstBasicEnrollmentOnly: true }),
+      openAuthorizationUrl: state.openBrowser,
     });
     return { status: "success" };
   } catch (error) {

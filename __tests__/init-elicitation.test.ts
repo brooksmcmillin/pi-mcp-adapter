@@ -80,6 +80,7 @@ describe("initializeMcp elicitation config", () => {
     expect(mocks.managers[0].setElicitationConfig).toHaveBeenCalledWith({
       ui: expect.any(Object),
       allowUrl: true,
+      openUrl: expect.any(Function),
     });
   });
 
@@ -129,6 +130,7 @@ describe("initializeMcp elicitation config", () => {
     expect(mocks.managers[0].setElicitationConfig).toHaveBeenCalledWith({
       ui: expect.any(Object),
       allowUrl: false,
+      openUrl: expect.any(Function),
     });
   });
 

@@ -17,6 +17,7 @@ export interface AuthenticateOptions {
     firstBasicEnrollmentOnly?: boolean;
     onDeviceAuthorization?: DeviceAuthOptions["onDeviceAuthorization"];
     onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>;
+    /** Opens the authorization URL in a browser; without it the URL is only surfaced. */
     openAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>;
     onAuthorizationInput?: (authorizationUrl: string, signal: AbortSignal) => Promise<string | undefined>;
     authStorageOptions?: AuthStorageOptions;

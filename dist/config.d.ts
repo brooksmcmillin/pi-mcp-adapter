@@ -116,10 +116,12 @@ export interface LoadedMcpConfig {
     /** Script tools whose entry came from a project config file, by name. Always set by loadMcpConfigWithSources. */
     projectScriptTools?: Map<string, ProjectServerSource>;
     /**
-     * One line per script tool a config file defines but the adapter did not load, with the reason.
+     * One line per script tool or server a config file defines but the adapter did not load, with the reason.
      * Kept apart from the migration notices, which also reach `mcp({})`. Always set by loadMcpConfigWithSources.
      */
     scriptToolIssues?: string[];
+    /** Enabled servers left out for not having exactly one transport, with the issue line also in `scriptToolIssues`. */
+    invalidServers?: Map<string, string>;
     projectServerPolicy: "ask" | "allow";
 }
 export declare const MCP_CONFIG_SOURCE_METADATA: unique symbol;
@@ -149,6 +151,8 @@ export interface ServerDisabledOverrideResult {
     path: string;
     changed: boolean;
 }
+/** Why a disabled override in the project Pi layer would never be read, or undefined when it would be. */
+export declare function getProjectServerDisabledOverrideRefusal(overridePath: string | undefined, cwd: string): string | undefined;
 /**
  * Persist only the disabled field in the project Pi layer. Enabling writes an
  * explicit false only when a lower-precedence source is itself disabled; this
