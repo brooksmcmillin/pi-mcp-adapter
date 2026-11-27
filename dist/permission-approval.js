@@ -1,5 +1,4 @@
 import { setTimeout as delay } from "node:timers/promises";
-import open from "open";
 import { abortable, throwIfAborted } from "./abort.js";
 import { combineAbortSignals } from "./runtime-owner.js";
 export function validateApprovalPreference(value) {
@@ -116,7 +115,7 @@ export async function handlePermissionApproval(options, params, request, form, s
                     return "totp";
                 if (choice !== "Open approval page")
                     return { action: "cancel" };
-                await abortable(open(request.approval_url), active);
+                await abortable(options.openUrl(request.approval_url), active);
             }
         };
         let result;

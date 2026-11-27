@@ -43,10 +43,6 @@ vi.mock("../mcp-callback-server.ts", () => ({
   releaseCallbackServer: mocks.releaseCallbackServer,
 }));
 
-vi.mock("open", () => ({
-  default: mocks.open,
-}));
-
 describe("mcp-auth-flow explicit auth", () => {
   const originalOAuthDir = process.env.MCP_OAUTH_DIR;
   const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -354,7 +350,7 @@ describe("mcp-auth-flow explicit auth", () => {
         clientSecret: "service-secret",
       },
       runtime,
-    });
+    }, { openAuthorizationUrl: mocks.open });
 
     expect(status).toBe("authenticated");
     expect(mocks.sdkAuth).toHaveBeenCalledTimes(1);
@@ -622,7 +618,7 @@ describe("mcp-auth-flow explicit auth", () => {
       url: "https://api.example.com/mcp",
       auth: "oauth",
       oauth: { grantType: "client_credentials" },
-    });
+    }, { openAuthorizationUrl: mocks.open });
 
     expect(status).toBe("authenticated");
     const stored = getAuthForUrl("stale-client-credentials", "https://api.example.com/mcp");
@@ -1336,7 +1332,7 @@ describe("mcp-auth-flow explicit auth", () => {
     await expect(authenticate("browser-fail", "https://api.example.com/mcp", {
       url: "https://api.example.com/mcp",
       auth: "oauth",
-    })).resolves.toBe("authenticated");
+    }, { openAuthorizationUrl: mocks.open })).resolves.toBe("authenticated");
 
     expect(mocks.sdkAuth).toHaveBeenNthCalledWith(2, expect.anything(), {
       serverUrl: "https://api.example.com/mcp",
@@ -1374,7 +1370,7 @@ describe("mcp-auth-flow explicit auth", () => {
     await expect(authenticate("remote-manual", "https://api.example.com/mcp", {
       url: "https://api.example.com/mcp",
       auth: "oauth",
-    }, { onAuthorizationInput })).resolves.toBe("authenticated");
+    }, { onAuthorizationInput, openAuthorizationUrl: mocks.open })).resolves.toBe("authenticated");
 
     expect(onAuthorizationInput).toHaveBeenCalledWith(
       "https://auth.example.com/authorize",
@@ -1440,7 +1436,7 @@ describe("mcp-auth-flow explicit auth", () => {
     const authentication = authenticate("cancel-token", "https://api.example.com/mcp", {
       url: "https://api.example.com/mcp",
       auth: "oauth",
-    }, { signal: controller.signal });
+    }, { signal: controller.signal, openAuthorizationUrl: mocks.open });
     await tokenExchangeStarted;
     controller.abort(reason);
     await expect(authentication).rejects.toBe(reason);
@@ -1500,7 +1496,7 @@ describe("mcp-auth-flow explicit auth", () => {
       await expect(authenticate("ui-auth", "https://api.example.com/mcp", {
         url: "https://api.example.com/mcp",
         auth: "oauth",
-      }, { onAuthorizationUrl })).resolves.toBe("authenticated");
+      }, { onAuthorizationUrl, openAuthorizationUrl: mocks.open })).resolves.toBe("authenticated");
     } finally {
       consoleLog.mockRestore();
     }
@@ -1714,7 +1710,6 @@ describe("mcp-auth-flow explicit auth", () => {
       reserveState: true,
       oauthState: expect.any(String),
     }));
-    expect(mocks.open).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1780,7 +1775,6 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(result.authorizationUrl).toContain("https://auth.example.com/authorize");
     expect(mocks.ensureCallbackServer).not.toHaveBeenCalled();
     expect(mocks.waitForCallback).not.toHaveBeenCalled();
-    expect(mocks.open).not.toHaveBeenCalled();
   });
 
   it("rejects raw code-only completion for pre-registered HTTPS redirect URI", async () => {
@@ -1833,6 +1827,7 @@ describe("mcp-auth-flow explicit auth", () => {
         },
       }, {
         onAuthorizationUrl: () => {},
+        openAuthorizationUrl: mocks.open,
         onAuthorizationInput: async (_authorizationUrl, signal) => {
           promptSignal = signal;
           markPromptStarted?.();
@@ -1874,7 +1869,6 @@ describe("mcp-auth-flow explicit auth", () => {
       reserveState: true,
       oauthState: expect.any(String),
     }));
-    expect(mocks.open).not.toHaveBeenCalled();
   });
 
   it("allows callback port fallback for dynamic registration", async () => {
@@ -1896,6 +1890,5 @@ describe("mcp-auth-flow explicit auth", () => {
       oauthState: expect.any(String),
     }));
     expect(mocks.reserveCallbackServer).not.toHaveBeenCalled();
-    expect(mocks.open).not.toHaveBeenCalled();
   });
 });

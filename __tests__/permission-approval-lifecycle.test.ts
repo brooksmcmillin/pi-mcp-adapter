@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import open from "open";
 import type { ElicitRequest, ElicitRequestFormParams } from "@modelcontextprotocol/client";
 import { handleElicitationRequest, type ElicitationHandlerOptions } from "../elicitation-handler.ts";
 import { PERMISSION_REQUEST_META, permissionRequest } from "../permission-approval.ts";
 
-vi.mock("open", () => ({ default: vi.fn().mockResolvedValue(undefined) }));
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 const pending = { request_id: "request-1", status: "pending", methods: ["totp", "passkey"], grant_id: null };
@@ -35,6 +33,7 @@ function request(methods = ["totp", "passkey"], seconds = 300): ElicitRequest {
 function options(): ElicitationHandlerOptions & { ui: { select: ReturnType<typeof vi.fn>; input: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> } } {
   return {
     serverName: "broker", allowUrl: true, approvalPreference: "push",
+    openUrl: vi.fn().mockResolvedValue(undefined),
     ui: { select: vi.fn().mockImplementation(() => new Promise(() => {})), input: vi.fn().mockResolvedValue("123456"), notify: vi.fn() },
     approvalClient: { callTool: vi.fn().mockResolvedValue(envelope(pending)) },
     onApprovalConfirmed: vi.fn().mockResolvedValue(undefined),
@@ -106,7 +105,7 @@ describe("request-bound permission approval", () => {
     opts.ui.select.mockResolvedValueOnce("Open approval page").mockResolvedValueOnce("Cancel");
     expect((await handleElicitationRequest(opts, request())).action).toBe("cancel");
     expect(opts.ui.select.mock.calls[0][0]).toContain("Page: https://broker.example/phone/?request=request-1");
-    expect(open).toHaveBeenCalledWith("https://broker.example/phone/?request=request-1");
+    expect(opts.openUrl).toHaveBeenCalledWith("https://broker.example/phone/?request=request-1");
     expect(opts.onApprovalConfirmed).not.toHaveBeenCalled();
     expect(opts.approvalClient!.callTool).toHaveBeenLastCalledWith(expect.objectContaining({ name: "permission_request.cancel" }), expect.anything());
   });

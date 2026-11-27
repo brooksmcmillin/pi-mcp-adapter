@@ -13,6 +13,8 @@ import {
   type KnownServerPreset,
   type SharedConfigTarget,
   getServerProvenance,
+  getProjectPiConfigPath,
+  getProjectServerDisabledOverrideRefusal,
   loadMcpConfig,
   previewCompatibilityImports,
   previewSharedServerEntry,
@@ -433,6 +435,7 @@ export async function authenticateServer(
   serverName: string,
   config: McpConfig,
   ctx: Pick<ExtensionContext, "hasUI" | "ui" | "cwd" | "signal">,
+  openBrowser: (url: string) => Promise<void>,
   signal?: AbortSignal,
   runtime?: McpOAuthRuntime,
   sharedAuthStorageOptions?: AuthStorageOptions,
@@ -489,6 +492,7 @@ export async function authenticateServer(
       ...enrollmentOptions,
       ...(Object.keys(authStorageOptions).length > 0 ? { authStorageOptions } : {}),
       onAuthorizationUrl: () => {},
+      openAuthorizationUrl: openBrowser,
       onDeviceAuthorization: ({ verificationUri, userCode }, pairingSignal, cancel) => {
         if (pairingSignal.aborted) return;
         const activationUrl = new URL(verificationUri);
@@ -754,7 +758,7 @@ export async function openMcpSetup(
       return { ...result, reachable: await isLocalServerReachable(preset.entry.url!) };
     },
     openPath: async (targetPath: string) => {
-      await openPath(pi, targetPath);
+      await openPath(targetPath);
     },
     markSetupCompleted: () => {
       persistSetupCompleted(discovery.fingerprint);
@@ -800,6 +804,7 @@ function buildMcpPanelCallbacks(
           serverName,
           config,
           ctx,
+          state.openBrowser,
           state.owner?.signal,
           state.oauthRuntime,
           state.authStorageOptions,
@@ -879,6 +884,10 @@ export async function openMcpPanel(
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
   const provenanceMap = getServerProvenance(configPath, ctx.cwd);
   const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd);
+  const disabledRefusal = getProjectServerDisabledOverrideRefusal(configPath, ctx.cwd);
+  const disabledSaveNote = disabledRefusal
+    ? `Save can't enable or disable servers here: ${disabledRefusal}`
+    : `Save writes enable/disable to ${getProjectPiConfigPath(ctx.cwd)}`;
 
   let overlayHandle: OverlayHandle | undefined;
   const callbacks = buildMcpPanelCallbacks(state, config, ctx, () => overlayHandle);
@@ -946,7 +955,7 @@ export async function openMcpPanel(
             done(undefined);
             resolve();
           });
-        }, { noticeLines, keybindings, theme });
+        }, { noticeLines, disabledSaveNote, keybindings, theme });
       },
       {
         overlay: true,

@@ -83,7 +83,7 @@ describe("startup autoAuth", () => {
     const { state, notify } = await boot();
     expect(mocks.authenticateServer).toHaveBeenCalledWith(
       "broker", state.config, expect.objectContaining({ hasUI: true }),
-      expect.any(AbortSignal), state.oauthRuntime, state.authStorageOptions, { firstBasicEnrollmentOnly: true },
+      state.openBrowser, expect.any(AbortSignal), state.oauthRuntime, state.authStorageOptions, { firstBasicEnrollmentOnly: true },
     );
     expect(connect).toHaveBeenCalledTimes(2);
     expect(state.sessionMetadata?.get("broker")).toMatchObject({ configHash: "hash", tools: [] });

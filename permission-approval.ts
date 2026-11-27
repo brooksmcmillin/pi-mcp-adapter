@@ -1,6 +1,5 @@
 import type { ElicitRequestFormParams, ElicitResult } from "@modelcontextprotocol/client";
 import { setTimeout as delay } from "node:timers/promises";
-import open from "open";
 import type { ElicitationHandlerOptions, ElicitationUIContext } from "./elicitation-handler.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";
@@ -138,7 +137,7 @@ export async function handlePermissionApproval(
           choices, { signal: active }), active);
         if (choice === "Use TOTP" && request.methods.includes("totp")) return "totp";
         if (choice !== "Open approval page") return { action: "cancel" };
-        await abortable(open(request.approval_url!), active);
+        await abortable(options.openUrl(request.approval_url!), active);
       }
     };
     let result: ElicitResult | "totp";
